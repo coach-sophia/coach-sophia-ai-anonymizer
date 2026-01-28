@@ -50,8 +50,8 @@ DETECTED ENTITY TYPES (40+):
 Personal: Names, DOB, Age, Gender, Demographics
 Contact: Email, Phone, Address, IP, URL
 Financial: Credit Cards, Bank Accounts, IBAN, Routing Numbers
-Government IDs: SSN, Passport, Driver License, Tax ID
-Medical: MRN, Health Plan, Prescriptions, NPI, DEA numbers
+Government IDs: SSN, Passport, Driver License, Tax ID, PAN (Permanent Account Number)
+Medical: MRN (Medical Record Number), Health Plan, Prescriptions, NPI, DEA numbers
 Biometric: Fingerprints, DNA, Facial Recognition
 Devices: VIN, Serial Numbers, IMEI, MAC addresses
 Credentials: API Keys, Passwords, Tokens
@@ -94,16 +94,15 @@ FALLBACK_PATTERNS = {
     'US_DRIVER_LICENSE': r'\b[A-Z]{1,2}\d{5,8}\b',
     
     # Medical/Health Identifiers (HIPAA PHI)
-    'MEDICAL_RECORD_NUMBER': r'\b(?:MRN|medical record|patient id)[\s#:]*[A-Z0-9]{6,12}\b',
+    'MEDICAL_RECORD_NUMBER': r'\b(?:MRN|medical\s+record|patient\s+id|mrn\s*#|patient\s+number)[\s#:\-]*[A-Z0-9\-]{6,12}\b',  # Medical Record Number (MRN) - handles formats like MRN-882734
     'HEALTH_PLAN_NUMBER': r'\b(?:health plan|insurance|policy)[\s#:]*[A-Z0-9]{6,20}\b',
     'PRESCRIPTION_NUMBER': r'\b(?:rx|prescription)[\s#:]*\d{6,12}\b',
     'NPI_NUMBER': r'\b\d{10}\b(?=.*npi)',
     'DEA_NUMBER': r'\b[A-Z]{2}\d{7}\b',
     
-    # Date Information (HIPAA - all dates related to individual)
-    'DATE_OF_BIRTH': r'\b(?:dob|date of birth|birth date|born)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
-    'DATE_FULL': r'\b(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])[/-](?:19|20)?\d{2}\b',
-    'DATE_ISO': r'\b(?:19|20)\d{2}[/-](?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])\b',
+    # Date of Birth ONLY - Other dates are preserved (user requirement)
+    # Only matches dates with explicit birth context keywords
+    'DATE_OF_BIRTH': r'\b(?:dob|date\s+of\s+birth|birth\s*date|birth\s*day|born\s+on|born|d\.o\.b\.?)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
     
     # Age (HIPAA - ages over 89)
     'AGE_OVER_89': r'\b(?:age|aged)[\s:]*(?:8[9]|9\d|1\d{2})\s*(?:years?|yrs?|y\.?o\.?)?\b',
@@ -130,6 +129,114 @@ FALLBACK_PATTERNS = {
     
     # Gender (for compliance - can be sensitive in some contexts)
     'GENDER_EXPLICIT': r'\b(?:gender|sex)[\s:]*(?:male|female|non-binary|transgender|intersex|other)\b',
+    
+    # Indian-specific identifiers (HIPAA "Any other unique identifying number" category + ISO 27001)
+    'AADHAAR_NUMBER': r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b',  # 12 digits in XXXX-XXXX-XXXX format
+    'PAN_NUMBER': r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b',  # Permanent Account Number (PAN) - 10 alphanumeric - format: ACBPM9988K
+    'INDIAN_PASSPORT': r'\b[A-Z]{1}[0-9]{7}\b',  # 8 alphanumeric starting with letter
+    
+    # Username/Handle (SOC 2, ISO 27001 access control & identifiers)
+    'USERNAME': r'\b(?:username|user|@|handle|login|uid)[\s:]*[A-Za-z0-9_\.]{4,32}\b',
+    
+    # Organization/Company Name (ISO 27001 - related party identification)
+    'COMPANY_NAME': r'\b(?:company|organization|corp|ltd|llc|pvt|inc|gmbh|ag|sa|plc)[\s:]*([A-Z][A-Za-z0-9\s&.,\'-]{2,50})?(?=\s|,|$)',
+    'ORGANIZATION_NAME': r'\b([A-Z][A-Za-z\s]+(?:Limited|Ltd|Corporation|Corp|Company|Inc|LLC|LLP|Pvt|Pvt\.|Ltd\.|Inc\.|LLC\.))\b',
+    
+    # Vehicle Registration/License Plate (HIPAA vehicle identifiers)
+    'VEHICLE_REGISTRATION': r'\b[A-Z]{2}[-\s]?\d{2}[-\s][A-Z]{2}[-\s]\d{4}\b',  # Indian format: GJ-01-AB-7788
+    
+    # Insurance/Policy Numbers (HIPAA health plan, ISO 27001)
+    'INSURANCE_POLICY_NUMBER': r'\b(?:policy|plan)[\s#:]*(?:number|no)?[\s#:]*[A-Z]{2,3}[-]?(?:IND[-]?)?\d{6,10}\b',
+    
+    # School/Institution Names (ISO 27001 - related entity identification)
+    'INSTITUTION_NAME': r'\b(?:school|college|university|institute|academy)[\s:]*([A-Z][A-Za-z\s&.,\'-]{3,50})\b',
+    
+    # ========== INTERNATIONAL IDENTITY CARDS (HIPAA "Any other unique identifying number" + ISO 27001) ==========
+    
+    # NORTH AMERICA
+    'US_SSN': r'\b\d{3}-\d{2}-\d{4}\b',  # 9 digits XXX-XX-XXXX (already covered as SSN but explicit)
+    'CANADIAN_SIN': r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',  # 9 digits social insurance number
+    'MEXICAN_CURP': r'\b[A-Z]{4}\d{6}[HM][A-Z]{5}\d{2}\b',  # Unique population registry code
+    
+    # SOUTH AMERICA
+    'BRAZILIAN_CPF': r'\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b',  # Format: XXX.XXX.XXX-XX or XXXXXXXXXXX
+    'ARGENTINIAN_DNI': r'\b\d{1,3}\.?\d{3}\.?\d{3}\b',  # 7-8 digits, format: X.XXX.XXX
+    'CHILEAN_RUN': r'\b\d{1,2}\.?\d{3}\.?\d{3}-?[0-9K]\b',  # Format: XX.XXX.XXX-X
+    'COLOMBIAN_CEDULA': r'\b\d{4,10}\b(?=\s|$)',  # 4-10 digits national ID
+    'VENEZUELAN_ID': r'\b[VJG]\d{6,9}\b',  # V/J/G prefix + 6-9 digits
+    
+    # EUROPE
+    'UK_NINO': r'\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b',  # National Insurance Number: LL NN NN NN L
+    'UK_NHS_NUMBER': r'\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b',  # NHS number format
+    'GERMAN_STEUERNUMMER': r'\b\d{2}[-\s]?\d{2,3}[-\s]?\d{3,4}[-\s]?\d{1}\b',  # Tax identification number
+    'FRENCH_INSEE': r'\b\d{1}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{3}[-\s]?\d{3}\b',  # 13 digits
+    'SPANISH_DNI': r'\b\d{8}-?[A-Z]\b',  # DNI: 8 digits + letter
+    'SPANISH_NIE': r'\b[XYZ]\d{7}-?[A-Z]\b',  # NIE: X/Y/Z + 7 digits + letter
+    'ITALIAN_CF': r'\b[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\b',  # Codice Fiscale: 16 chars
+    'DUTCH_BSN': r'\b\d{9}\b',  # 9-digit citizen service number
+    'BELGIAN_ID': r'\b\d{2}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{3}[-\s]?\d{2}\b',  # 12 digits
+    'POLISH_PESEL': r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}\d{3}[0-9]\b',  # Birth number + 4 digits
+    'PORTUGUESE_NIC': r'\b\d{7}[-\s]?[A-Z]{2}\d\b',  # 7 digits + 2 letters + digit
+    'PORTUGUESE_NIF': r'\b\d{9}\b',  # 9 digits tax number
+    'CZECH_BIRTH_NUMBER': r'\b\d{10}\b',  # 10 digits YYMMDDSSSC
+    'DANISH_CPR': r'\b\d{6}[-]?\d{4}\b',  # 10 digits DDMMYY-SSSS
+    'FINNISH_PIN': r'\b\d{6}[-+A]\d{3}[0-9A-Y]\b',  # 11 chars personal identity code
+    'SWEDISH_PERSONNUMMER': r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])[-]?\d{4}\b',  # 12 digits
+    'NORWEGIAN_FOEDSELS': r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{5}\b',  # 11 digits
+    'AUSTRIAN_PIN': r'\b\d{3}\s?\d{3}\s?\d{3}\b',  # 9 digits social security number
+    'HUNGARIAN_ID': r'\b\d{6}-?[0-9A-Z]{4}\b',  # Birth date + 4 digits
+    'GREEK_ID': r'\b[A-Z][0-9]{7}\b',  # 1 letter + 7 digits or 2 letters + 6 digits
+    'ROMANIAN_CNP': r'\b\d{1}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{6}\b',  # 13 digits GYYMMDDSSSC
+    'BULGARIAN_EGN': r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{5}[0-9]\b',  # 10 digits
+    'CROATIAN_OIB': r'\b\d{11}\b',  # 11 digits personal ID number
+    'SLOVAK_BIRTH_NUMBER': r'\b\d{10}\b',  # 10 digits birth number
+    'SLOVENIAN_EMSO': r'\b\d{13}\b',  # 13 digits DDMMYYYRRSSSC
+    'ESTONIA_ID': r'\b\d{11}\b',  # 11 digits ID code
+    'LATVIA_ID': r'\b\d{6}[-]?\d{5}\b',  # 11 digits DDMMYY-NNNNN
+    'LITHUANIA_ID': r'\b\d{11}\b',  # 11 digits personal ID code
+    'ICELAND_KENNITALA': r'\b\d{6}[-]?\d{4}\b',  # 10 digits
+    'IRELAND_PPSN': r'\b\d{7}[A-Z]{1,2}\b',  # Personal public service number
+    
+    # MIDDLE EAST & CENTRAL ASIA
+    'UAE_CIVIL_NUMBER': r'\b784[-]?\d{4}[-]?\d{7}[-]?\d{1}\b',  # 15 digits 784-YYYY-NNNNNNN-C
+    'SAUDI_NATIONAL_ID': r'\b\d{10}\b',  # 10 digits
+    'ISRAELI_ID': r'\b\d{9}\b',  # 9 digits national ID
+    'IRAN_NATIONAL_ID': r'\b\d{3}[-]?\d{6}[-]?\d{1}\b',  # 10 digits XXX-XXXXXX-X
+    'BAHRAIN_ID': r'\b\d{9}\b',  # 9 digits YYMMNNNNC
+    'KUWAIT_CIVIL_ID': r'\b\d{12}\b',  # 12 digits
+    'IRAQ_NATIONAL_ID': r'\b\d{10}[-]?\d{4}[-]?\d{1}\b',  # 15 digits
+    
+    # ASIA
+    'CHINESE_ID': r'\b\d{18}\b',  # 18 digits RRRRRRYYYYMMDDSSSC
+    'CHINESE_ID_OLD': r'\b\d{15}\b',  # 15 digits (old format, still in use)
+    'HONG_KONG_ID': r'\b[A-Z]\d{6}\([0-9A]\)\b',  # Letter + 6 digits + checksum
+    'TAIWAN_ID': r'\b[A-Z]\d{9}\b',  # Letter + 9 digits
+    'JAPANESE_MY_NUMBER': r'\b\d{12}\b',  # 12 digits My Number system
+    'SOUTH_KOREAN_RRN': r'\b\d{6}[-]?\d{7}\b',  # 13 digits YYMMDD-DDDDDDD
+    'SINGAPORE_NRIC': r'\b[STG]\d{7}[A-Z]\b',  # Format: S/T/G + 7 digits + letter
+    'MALAYSIAN_ID': r'\b\d{6}[-]?\d{2}[-]?\d{4}[0-9]\b',  # 12 digits YYMMDD-SS-###G
+    'INDONESIAN_NIK': r'\b\d{16}\b',  # 16 digits national identification number
+    'THAI_ID': r'\b\d{1}[-]?\d{4}[-]?\d{5}[-]?\d{2}[-]?\d{1}\b',  # 13 digits N-NNNN-NNNNN-NN-N
+    'VIETNAMESE_ID': r'\b\d{9,12}\b',  # 9-12 digits national ID
+    'PHILIPPINE_PHILSYS': r'\b\d{2}[-]?\d{4}[-]?\d{3}[-]?\d{3}\b',  # 12 digits
+    'PAKISTAN_CNIC': r'\b\d{5}[-]?\d{7}[-]?\d{1}\b',  # 13 digits XXXXX-XXXXXXX-X
+    'NEPAL_CITIZENSHIP': r'\b[A-Z]{2}[-]?\d{6}\b',  # 2 letters + 6 digits
+    'BANGLADESH_NID': r'\b\d{10,17}\b',  # 10-17 digits
+    'CAMBODIA_ID': r'\b\d{9}\b',  # 9 digits
+    
+    # AFRICA
+    'SOUTH_AFRICAN_ID': r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9]\d{2}\b',  # 13 digits YYMMDDGSSSCAZ
+    'NIGERIAN_NIN': r'\b\d{11}\b',  # 11 digits national identification number
+    'KENYAN_ID': r'\b\d{6,10}\b',  # Variable length national ID
+    'GHANAIAN_ID': r'\b[A-Z][-]?\d{9,10}\b',  # Letter + 9-10 digits
+    'EGYPTIAN_ID': r'\b\d{14}\b',  # 14 digits
+    'MOROCCAN_ID': r'\b[A-Z]?\d{6,8}\b',  # 6-8 digits national ID
+    'ETHIOPIAN_ID': r'\b\d{9,12}\b',  # 9-12 digits
+    
+    # OCEANIA
+    'AUSTRALIAN_TFN': r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',  # 9 digits tax file number
+    'NEW_ZEALAND_IRD': r'\b\d{2}[-\s]?\d{3}[-\s]?\d{3}\b',  # 8 digits IRD number
+    'NEW_ZEALAND_NHI': r'\b[A-Z]{3}\d{4}\b',  # 3 letters + 4 digits health identifier
 }
 
 # Initialize FastAPI app
@@ -246,127 +353,292 @@ async def startup_event():
             import asyncio
             await asyncio.sleep(2 ** retry_count)  # Exponential backoff
 
-# Enhanced generic noun mappings (HIPAA, ISO 27001, SOC 2 compliant)
+# Enhanced generic noun mappings - Contextually relevant replacements
+# Each replacement is chosen to maintain sentence readability while removing PII
 GENERIC_NOUNS = {
-    # Personal Identifiers
-    'PERSON': 'person',
-    'NAME': 'person',
-    'PATIENT_NAME': 'patient',
+    # Personal Identifiers - Use natural language nouns
+    'PERSON': '[Person]',
+    'NAME': '[Person]',
+    'PATIENT_NAME': '[Patient]',
     
-    # Contact Information
-    'EMAIL_ADDRESS': 'email',
-    'PHONE_NUMBER': 'phone',
-    'FAX_NUMBER': 'fax',
-    'URL': 'website',
-    'IP_ADDRESS': 'address',
+    # Contact Information - Clear descriptive placeholders
+    'EMAIL_ADDRESS': '[email address]',
+    'PHONE_NUMBER': '[phone number]',
+    'FAX_NUMBER': '[fax number]',
+    'URL': '[website]',
+    'IP_ADDRESS': '[IP address]',
     
-    # Location Data
-    'LOCATION': 'location',
-    'GPE': 'location',
-    'LOC': 'location',
-    'ADDRESS': 'address',
-    'STREET_ADDRESS': 'address',
-    'CITY': 'city',
-    'STATE': 'state',
-    'ZIP_CODE': 'zipcode',
-    'COUNTRY': 'country',
+    # Location Data - Preserve context
+    'LOCATION': '[location]',
+    'GPE': '[place]',
+    'LOC': '[location]',
+    'ADDRESS': '[address]',
+    'STREET_ADDRESS': '[street address]',
+    'CITY': '[city]',
+    'STATE': '[state]',
+    'ZIP_CODE': '[zip code]',
+    'COUNTRY': '[country]',
     
-    # Organizations
-    'ORGANIZATION': 'organization',
-    'ORG': 'organization',
-    'FACILITY': 'facility',
-    'HOSPITAL': 'facility',
+    # Organizations - Descriptive
+    'ORGANIZATION': '[organization]',
+    'ORG': '[organization]',
+    'FACILITY': '[facility]',
+    'HOSPITAL': '[medical facility]',
     
-    # Temporal Information (HIPAA - all dates)
-    'DATE_TIME': 'date',
-    'DATE': 'date',
-    'TIME': 'time',
-    'DATE_OF_BIRTH': 'date',
-    'DATE_FULL': 'date',
-    'DATE_ISO': 'date',
-    'ADMISSION_DATE': 'date',
-    'DISCHARGE_DATE': 'date',
-    'DEATH_DATE': 'date',
+    # Date of Birth ONLY - Other dates are preserved per user requirement
+    # Generic DATE and DATE_TIME from ML models are EXCLUDED from anonymization
+    'DATE_OF_BIRTH': '[birth date]',
+    'DOB': '[birth date]',
+    'BIRTHDAY': '[birth date]',
     
-    # Age Information (HIPAA)
-    'AGE': 'age',
-    'AGE_OVER_89': 'age',
-    'AGE_GENERAL': 'age',
+    # Age Information (HIPAA) - Descriptive
+    'AGE': '[age]',
+    'AGE_OVER_89': '[age]',
+    'AGE_GENERAL': '[age]',
     
-    # Financial Information (SOC 2)
-    'CREDIT_CARD': 'payment',
-    'IBAN_CODE': 'account',
-    'ACCOUNT_NUMBER': 'account',
-    'ROUTING_NUMBER': 'routing',
-    'BANK_ACCOUNT': 'account',
-    'SWIFT_CODE': 'code',
+    # Financial Information (SOC 2) - Clear placeholders
+    'CREDIT_CARD': '[credit card number]',
+    'IBAN_CODE': '[bank account]',
+    'ACCOUNT_NUMBER': '[account number]',
+    'ROUTING_NUMBER': '[routing number]',
+    'BANK_ACCOUNT': '[bank account]',
+    'SWIFT_CODE': '[bank code]',
     
-    # Government IDs (HIPAA)
-    'SSN': 'identifier',
-    'US_SSN': 'identifier',
-    'US_PASSPORT': 'identifier',
-    'US_DRIVER_LICENSE': 'identifier',
-    'DRIVER_LICENSE': 'identifier',
-    'PASSPORT': 'identifier',
-    'TAX_ID': 'identifier',
-    'NATIONAL_ID': 'identifier',
+    # Government IDs (HIPAA) - Descriptive placeholders
+    'SSN': '[social security number]',
+    'US_SSN': '[social security number]',
+    'US_PASSPORT': '[passport number]',
+    'US_DRIVER_LICENSE': '[driver license]',
+    'DRIVER_LICENSE': '[driver license]',
+    'PASSPORT': '[passport number]',
+    'TAX_ID': '[tax identifier]',
+    'NATIONAL_ID': '[national ID]',
     
-    # Medical/Health Identifiers (HIPAA PHI)
-    'MEDICAL_RECORD_NUMBER': 'medical_record',
-    'HEALTH_PLAN_NUMBER': 'health_plan',
-    'PATIENT_ID': 'patient_id',
-    'PRESCRIPTION_NUMBER': 'prescription',
-    'NPI_NUMBER': 'provider_id',
-    'DEA_NUMBER': 'license',
-    'MEDICAL_LICENSE': 'license',
-    'INSURANCE_NUMBER': 'insurance',
-    'POLICY_NUMBER': 'policy',
-    'MEMBER_ID': 'member_id',
+    # Medical/Health Identifiers (HIPAA PHI) - Clear medical context
+    'MEDICAL_RECORD_NUMBER': '[medical record number]',
+    'HEALTH_PLAN_NUMBER': '[health plan ID]',
+    'PATIENT_ID': '[patient ID]',
+    'PRESCRIPTION_NUMBER': '[prescription number]',
+    'NPI_NUMBER': '[provider ID]',
+    'DEA_NUMBER': '[DEA number]',
+    'MEDICAL_LICENSE': '[medical license]',
+    'INSURANCE_NUMBER': '[insurance ID]',
+    'POLICY_NUMBER': '[policy number]',
+    'MEMBER_ID': '[member ID]',
     
-    # Biometric & Physical Data (HIPAA)
-    'BIOMETRIC_ID': 'biometric',
-    'FINGERPRINT': 'biometric',
-    'RETINA_SCAN': 'biometric',
-    'FACIAL_RECOGNITION': 'biometric',
-    'GENETIC_MARKER': 'genetic_data',
-    'DNA_SEQUENCE': 'genetic_data',
+    # Biometric & Physical Data (HIPAA) - Clear descriptions
+    'BIOMETRIC_ID': '[biometric data]',
+    'FINGERPRINT': '[biometric data]',
+    'RETINA_SCAN': '[biometric data]',
+    'FACIAL_RECOGNITION': '[biometric data]',
+    'GENETIC_MARKER': '[genetic data]',
+    'DNA_SEQUENCE': '[genetic data]',
     
-    # Vehicle & Device Identifiers (HIPAA)
-    'VIN': 'vehicle',
-    'LICENSE_PLATE': 'vehicle',
-    'DEVICE_ID': 'device',
-    'SERIAL_NUMBER': 'serial',
-    'MAC_ADDRESS': 'address',
-    'IMEI': 'device',
+    # Vehicle & Device Identifiers (HIPAA) - Descriptive
+    'VIN': '[vehicle identifier]',
+    'LICENSE_PLATE': '[license plate]',
+    'DEVICE_ID': '[device identifier]',
+    'SERIAL_NUMBER': '[serial number]',
+    'MAC_ADDRESS': '[device address]',
+    'IMEI': '[device identifier]',
     
     # Certificates & Licenses (HIPAA)
-    'CERTIFICATE_NUMBER': 'certificate',
-    'LICENSE_NUMBER': 'license',
+    'CERTIFICATE_NUMBER': '[certificate number]',
+    'LICENSE_NUMBER': '[license number]',
     
-    # Sensitive Personal Data (ISO 27001, GDPR)
-    'GENDER': 'gender',
-    'GENDER_EXPLICIT': 'gender',
-    'ETHNICITY': 'demographic',
-    'RACE': 'demographic',
-    'RELIGION': 'demographic',
-    'SEXUAL_ORIENTATION': 'demographic',
-    'MARITAL_STATUS': 'demographic',
+    # Sensitive Personal Data (ISO 27001, GDPR) - Neutral placeholders
+    'GENDER': '[gender]',
+    'GENDER_EXPLICIT': '[gender]',
+    'ETHNICITY': '[demographic info]',
+    'RACE': '[demographic info]',
+    'RELIGION': '[religious affiliation]',
+    'SEXUAL_ORIENTATION': '[personal info]',
+    'MARITAL_STATUS': '[marital status]',
     
-    # Security & Access (SOC 2)
-    'CRYPTO': 'wallet',
-    'CRYPTO_WALLET': 'wallet',
-    'API_KEY': 'credential',
-    'ACCESS_TOKEN': 'credential',
-    'SECRET_KEY': 'credential',
-    'PASSWORD': 'credential',
-    'AUTH_TOKEN': 'credential',
+    # Security & Access (SOC 2) - Clear credential markers
+    'CRYPTO': '[crypto wallet]',
+    'CRYPTO_WALLET': '[crypto wallet]',
+    'API_KEY': '[API credential]',
+    'ACCESS_TOKEN': '[access token]',
+    'SECRET_KEY': '[secret key]',
+    'PASSWORD': '[password]',
+    'AUTH_TOKEN': '[auth token]',
+    'USERNAME': '[username]',
     
-    # Other
-    'DEFAULT': 'information'
+    # Indian-specific identifiers (HIPAA "Any other unique identifying number", ISO 27001)
+    'AADHAAR_NUMBER': '[Aadhaar number]',
+    'PAN_NUMBER': '[PAN number]',
+    'INDIAN_PASSPORT': '[passport number]',
+    'PASSPORT_NUMBER': '[passport number]',
+    'PAN': '[PAN number]',
+    
+    # Organization & Related Entities (ISO 27001)
+    'COMPANY_NAME': '[company name]',
+    'ORGANIZATION_NAME': '[organization name]',
+    'INSTITUTION_NAME': '[institution name]',
+    
+    # Vehicle & Insurance (HIPAA vehicle identifiers, ISO 27001)
+    'VEHICLE_REGISTRATION': '[vehicle registration]',
+    'INSURANCE_POLICY_NUMBER': '[policy number]',
+    'INSURANCE_POLICY': '[policy number]',
+    
+    # ========== INTERNATIONAL IDENTITY CARDS ==========
+    # All international IDs use a generic [national ID] placeholder
+    # North America
+    'CANADIAN_SIN': '[national ID]',
+    'MEXICAN_CURP': '[national ID]',
+    
+    # South America
+    'BRAZILIAN_CPF': '[national ID]',
+    'ARGENTINIAN_DNI': '[national ID]',
+    'CHILEAN_RUN': '[national ID]',
+    'COLOMBIAN_CEDULA': '[national ID]',
+    'VENEZUELAN_ID': '[national ID]',
+    
+    # Europe
+    'UK_NINO': '[national ID]',
+    'UK_NHS_NUMBER': '[health ID]',
+    'GERMAN_STEUERNUMMER': '[tax ID]',
+    'FRENCH_INSEE': '[national ID]',
+    'SPANISH_DNI': '[national ID]',
+    'SPANISH_NIE': '[national ID]',
+    'ITALIAN_CF': '[national ID]',
+    'DUTCH_BSN': '[national ID]',
+    'BELGIAN_ID': '[national ID]',
+    'POLISH_PESEL': '[national ID]',
+    'PORTUGUESE_NIC': '[national ID]',
+    'PORTUGUESE_NIF': '[tax ID]',
+    'CZECH_BIRTH_NUMBER': '[national ID]',
+    'DANISH_CPR': '[national ID]',
+    'FINNISH_PIN': '[national ID]',
+    'SWEDISH_PERSONNUMMER': '[national ID]',
+    'NORWEGIAN_FOEDSELS': '[national ID]',
+    'AUSTRIAN_PIN': '[national ID]',
+    'HUNGARIAN_ID': '[national ID]',
+    'GREEK_ID': '[national ID]',
+    'ROMANIAN_CNP': '[national ID]',
+    'BULGARIAN_EGN': '[national ID]',
+    'CROATIAN_OIB': '[national ID]',
+    'SLOVAK_BIRTH_NUMBER': '[national ID]',
+    'SLOVENIAN_EMSO': '[national ID]',
+    'ESTONIA_ID': '[national ID]',
+    'LATVIA_ID': '[national ID]',
+    'LITHUANIA_ID': '[national ID]',
+    'ICELAND_KENNITALA': '[national ID]',
+    'IRELAND_PPSN': '[national ID]',
+    
+    # Middle East & Central Asia
+    'UAE_CIVIL_NUMBER': '[national ID]',
+    'SAUDI_NATIONAL_ID': '[national ID]',
+    'ISRAELI_ID': '[national ID]',
+    'IRAN_NATIONAL_ID': '[national ID]',
+    'BAHRAIN_ID': '[national ID]',
+    'KUWAIT_CIVIL_ID': '[national ID]',
+    'IRAQ_NATIONAL_ID': '[national ID]',
+    
+    # Asia
+    'CHINESE_ID': '[national ID]',
+    'CHINESE_ID_OLD': '[national ID]',
+    'HONG_KONG_ID': '[national ID]',
+    'TAIWAN_ID': '[national ID]',
+    'JAPANESE_MY_NUMBER': '[national ID]',
+    'SOUTH_KOREAN_RRN': '[national ID]',
+    'SINGAPORE_NRIC': '[national ID]',
+    'MALAYSIAN_ID': '[national ID]',
+    'INDONESIAN_NIK': '[national ID]',
+    'THAI_ID': '[national ID]',
+    'VIETNAMESE_ID': '[national ID]',
+    'PHILIPPINE_PHILSYS': '[national ID]',
+    'PAKISTAN_CNIC': '[national ID]',
+    'NEPAL_CITIZENSHIP': '[national ID]',
+    'BANGLADESH_NID': '[national ID]',
+    'CAMBODIA_ID': '[national ID]',
+    
+    # Africa
+    'SOUTH_AFRICAN_ID': '[national ID]',
+    'NIGERIAN_NIN': '[national ID]',
+    'KENYAN_ID': '[national ID]',
+    'GHANAIAN_ID': '[national ID]',
+    'EGYPTIAN_ID': '[national ID]',
+    'MOROCCAN_ID': '[national ID]',
+    'ETHIOPIAN_ID': '[national ID]',
+    
+    # Oceania
+    'AUSTRALIAN_TFN': '[tax ID]',
+    'NEW_ZEALAND_IRD': '[tax ID]',
+    'NEW_ZEALAND_NHI': '[health ID]',
+    
+    # Default fallback
+    'DEFAULT': '[personal information]'
 }
 
+# Entity types to EXCLUDE from anonymization
+# These are detected by ML but should NOT be anonymized per user requirement
+EXCLUDED_ENTITY_TYPES = {
+    'DATE',           # Generic dates (appointment dates, event dates, etc.) - PRESERVE
+    'DATE_TIME',      # Generic date/time - PRESERVE
+    'TIME',           # Time alone - PRESERVE
+    'DATE_FULL',      # Generic full date format - PRESERVE (if detected)
+    'DATE_ISO',       # Generic ISO date format - PRESERVE (if detected)
+    'ADMISSION_DATE', # Admission dates - PRESERVE (unless required)
+    'DISCHARGE_DATE', # Discharge dates - PRESERVE (unless required)
+    'DEATH_DATE',     # Death dates - PRESERVE (unless required)
+    'CARDINAL',       # Numbers (spaCy) - PRESERVE
+    'ORDINAL',        # Ordinal numbers (spaCy) - PRESERVE
+    'QUANTITY',       # Quantities (spaCy) - PRESERVE
+    'MONEY',          # Money amounts (spaCy) - PRESERVE
+    'PERCENT',        # Percentages (spaCy) - PRESERVE
+    'NORP',           # Nationalities/religions/political groups (spaCy) - context dependent
+    'EVENT',          # Events (spaCy) - PRESERVE
+    'WORK_OF_ART',    # Titles of works (spaCy) - PRESERVE
+    'LAW',            # Legal documents (spaCy) - PRESERVE
+    'LANGUAGE',       # Languages (spaCy) - PRESERVE
+    'PRODUCT',        # Products (spaCy) - PRESERVE
+}
+
+# Entity types that ARE birth-date related and should be anonymized
+BIRTH_DATE_ENTITY_TYPES = {
+    'DATE_OF_BIRTH',
+    'DOB',
+    'BIRTH_DATE',
+    'BIRTHDAY',
+}
+
+def should_anonymize_entity(entity_type: str, entity_text: str = "", context: str = "") -> bool:
+    """
+    Determine if an entity should be anonymized based on its type and context.
+    
+    Rules:
+    1. Excluded entity types are NEVER anonymized
+    2. Birth date entity types are ALWAYS anonymized
+    3. Generic DATE entities are only anonymized if context suggests birth date
+    """
+    entity_upper = entity_type.upper()
+    
+    # Always anonymize birth date types
+    if entity_upper in BIRTH_DATE_ENTITY_TYPES:
+        return True
+    
+    # Never anonymize excluded types
+    if entity_upper in EXCLUDED_ENTITY_TYPES:
+        # Double-check: is this actually a birth date disguised as DATE?
+        birth_keywords = ['birth', 'born', 'dob', 'd.o.b', 'birthday']
+        context_lower = context.lower()
+        entity_lower = entity_text.lower()
+        
+        # Check if birth context is within 50 chars of the entity
+        for keyword in birth_keywords:
+            if keyword in context_lower or keyword in entity_lower:
+                logger.info(f"DATE entity '{entity_text}' has birth context - will anonymize")
+                return True
+        
+        return False
+    
+    # All other entity types - anonymize
+    return True
+
 def get_generic_noun(entity_type: str) -> str:
-    """Get generic noun for entity type."""
+    """Get contextually relevant generic noun for entity type."""
     return GENERIC_NOUNS.get(entity_type.upper(), GENERIC_NOUNS['DEFAULT'])
 
 def create_custom_recognizers():
@@ -379,15 +651,24 @@ def create_custom_recognizers():
     custom_recognizers = []
     
     try:
-        # Date of Birth Recognizer (HIPAA critical)
+        # Date of Birth Recognizer - ONLY matches dates with explicit birth context
+        # Generic dates are NOT anonymized per user requirement
         dob_patterns = [
-            Pattern(name="dob_explicit", regex=r'\b(?:dob|date of birth|birth date|born)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.9),
-            Pattern(name="dob_format", regex=r'\b(?:0?[1-9]|1[0-2])[/-](?:0?[1-9]|[12]\d|3[01])[/-](?:19[0-9]{2}|20[0-2][0-9])\b', score=0.6),
+            # Explicit DOB keyword followed by date
+            Pattern(name="dob_keyword", regex=r'\b(?:dob|d\.o\.b\.?)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
+            # "date of birth" phrase followed by date
+            Pattern(name="date_of_birth", regex=r'\bdate\s+of\s+birth[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
+            # "birth date" or "birthday" followed by date
+            Pattern(name="birth_date", regex=r'\bbirth\s*(?:date|day)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
+            # "born on" or "born" followed by date
+            Pattern(name="born_on", regex=r'\bborn\s+(?:on\s+)?(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.9),
+            # Date followed by "is my birthday" or similar
+            Pattern(name="my_birthday", regex=r'(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\s+(?:is\s+)?(?:my\s+)?(?:birth\s*day|birthday)', score=0.9),
         ]
         dob_recognizer = PatternRecognizer(
             supported_entity="DATE_OF_BIRTH",
             patterns=dob_patterns,
-            context=["born", "dob", "birth", "birthday"]
+            context=["born", "dob", "birth", "birthday", "date of birth", "d.o.b"]
         )
         custom_recognizers.append(dob_recognizer)
         
@@ -406,13 +687,14 @@ def create_custom_recognizers():
         
         # Medical Record Number (HIPAA PHI)
         mrn_patterns = [
-            Pattern(name="mrn_explicit", regex=r'\b(?:MRN|medical record|patient id)[\s#:]*[A-Z0-9]{6,12}\b', score=0.9),
-            Pattern(name="mrn_pattern", regex=r'\bMRN[\s#:]*\d{6,10}\b', score=0.95),
+            Pattern(name="mrn_explicit", regex=r'\b(?:MRN|medical\s+record|patient\s+id|mrn\s*#)[\s#:\-]*[A-Z0-9\-]{6,12}\b', score=0.9),
+            Pattern(name="mrn_pattern", regex=r'\bMRN[\s#:\-]*\d{6,10}\b', score=0.95),
+            Pattern(name="mrn_full_text", regex=r'\bmedical\s+record\s+number[\s#:\-]*[A-Z0-9\-]{6,12}\b', score=0.95),
         ]
         mrn_recognizer = PatternRecognizer(
             supported_entity="MEDICAL_RECORD_NUMBER",
             patterns=mrn_patterns,
-            context=["medical record", "MRN", "patient id", "patient number"]
+            context=["medical record", "medical record number", "MRN", "patient id", "patient number", "patient record"]
         )
         custom_recognizers.append(mrn_recognizer)
         
@@ -494,7 +776,307 @@ def create_custom_recognizers():
         )
         custom_recognizers.append(account_recognizer)
         
+        # Aadhaar Number (Indian unique identifier - HIPAA "Any other unique number")
+        aadhaar_pattern = Pattern(
+            name="aadhaar",
+            regex=r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b',
+            score=0.95
+        )
+        aadhaar_recognizer = PatternRecognizer(
+            supported_entity="AADHAAR_NUMBER",
+            patterns=[aadhaar_pattern],
+            context=["aadhaar", "aadhaar number", "uid"]
+        )
+        custom_recognizers.append(aadhaar_recognizer)
+        
+        # PAN Number (Permanent Account Number - Indian tax identifier - HIPAA "Any other unique number")
+        pan_pattern = Pattern(
+            name="pan",
+            regex=r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b',
+            score=0.95
+        )
+        pan_recognizer = PatternRecognizer(
+            supported_entity="PAN_NUMBER",
+            patterns=[pan_pattern],
+            context=["PAN", "pan", "pan number", "permanent account", "tax identifier", "tax number"]
+        )
+        custom_recognizers.append(pan_recognizer)
+        
+        # Indian Passport (HIPAA passport number + ISO 27001 identifier)
+        passport_pattern = Pattern(
+            name="indian_passport",
+            regex=r'\b[A-Z]{1}[0-9]{7}\b',
+            score=0.9
+        )
+        passport_recognizer = PatternRecognizer(
+            supported_entity="INDIAN_PASSPORT",
+            patterns=[passport_pattern],
+            context=["passport", "passport number"]
+        )
+        custom_recognizers.append(passport_recognizer)
+        
+        # Username (SOC 2, ISO 27001 - access control and online identifiers)
+        username_pattern = Pattern(
+            name="username",
+            regex=r'\b(?:username|user|handle|login|uid)[\s:]*([A-Za-z0-9_\.]{4,32})\b',
+            score=0.85
+        )
+        username_recognizer = PatternRecognizer(
+            supported_entity="USERNAME",
+            patterns=[username_pattern],
+            context=["username", "user", "handle", "login", "@"]
+        )
+        custom_recognizers.append(username_recognizer)
+        
+        # Company/Organization Name (ISO 27001 - related entity identification)
+        company_patterns = [
+            Pattern(name="company_explicit", regex=r'\b([A-Z][A-Za-z\s&.,\'-]*(?:Limited|Ltd|Corporation|Corp|Company|Inc|LLC|LLP|Pvt|Pvt\.|Ltd\.|Inc\.|LLC\.|Technologies|Tech))\b', score=0.85),
+            Pattern(name="company_pvt_ltd", regex=r'\b([A-Z][A-Za-z\s&.,\'-]+(?:\s+(?:Pvt|Pvt\.|Private)\s+(?:Ltd|Limited)))\b', score=0.9),
+        ]
+        company_recognizer = PatternRecognizer(
+            supported_entity="COMPANY_NAME",
+            patterns=company_patterns,
+            context=["company", "organization", "corporation", "inc", "ltd", "pvt"]
+        )
+        custom_recognizers.append(company_recognizer)
+        
+        # Vehicle Registration Number (HIPAA vehicle identifiers, Indian format)
+        registration_pattern = Pattern(
+            name="vehicle_registration",
+            regex=r'\b[A-Z]{2}[-\s]?\d{2}[-\s][A-Z]{2}[-\s]\d{4}\b',  # GJ-01-AB-7788
+            score=0.9
+        )
+        registration_recognizer = PatternRecognizer(
+            supported_entity="VEHICLE_REGISTRATION",
+            patterns=[registration_pattern],
+            context=["registration", "vehicle", "car", "number plate"]
+        )
+        custom_recognizers.append(registration_recognizer)
+        
+        # Insurance/Policy Number (HIPAA health plan, ISO 27001)
+        policy_patterns = [
+            Pattern(name="policy_explicit", regex=r'\b(?:policy|plan)[\s#:]*(?:number|no)?[\s#:]*([A-Z]{2,3}[-]?(?:IND[-]?)?\d{6,10})\b', score=0.9),
+            Pattern(name="policy_code", regex=r'\b(?:HS|HP|AP)[-](?:IND[-])?\d{6,10}\b', score=0.85),
+        ]
+        policy_recognizer = PatternRecognizer(
+            supported_entity="INSURANCE_POLICY_NUMBER",
+            patterns=policy_patterns,
+            context=["policy", "plan", "insurance", "health"]
+        )
+        custom_recognizers.append(policy_recognizer)
+        
+        # School/Institution Name (ISO 27001 - related entity identification)
+        institution_pattern = Pattern(
+            name="institution",
+            regex=r'\b(?:school|college|university|institute|academy)[\s:]*([A-Z][A-Za-z\s&.,\'-]{3,50})\b',
+            score=0.8
+        )
+        institution_recognizer = PatternRecognizer(
+            supported_entity="INSTITUTION_NAME",
+            patterns=[institution_pattern],
+            context=["school", "college", "university", "institute", "academy"]
+        )
+        custom_recognizers.append(institution_recognizer)
+        
+        # ========== INTERNATIONAL IDENTITY CARD RECOGNIZERS ==========
+        
+        # UK NINO (National Insurance Number)
+        uk_nino_pattern = Pattern(
+            name="uk_nino",
+            regex=r'\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b',
+            score=0.95
+        )
+        uk_nino_recognizer = PatternRecognizer(
+            supported_entity="UK_NINO",
+            patterns=[uk_nino_pattern],
+            context=["NINO", "national insurance", "insurance number"]
+        )
+        custom_recognizers.append(uk_nino_recognizer)
+        
+        # Canadian SIN (Social Insurance Number)
+        canadian_sin_pattern = Pattern(
+            name="canadian_sin",
+            regex=r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',
+            score=0.85
+        )
+        canadian_sin_recognizer = PatternRecognizer(
+            supported_entity="CANADIAN_SIN",
+            patterns=[canadian_sin_pattern],
+            context=["SIN", "social insurance", "canada"]
+        )
+        custom_recognizers.append(canadian_sin_recognizer)
+        
+        # Brazilian CPF
+        brazilian_cpf_pattern = Pattern(
+            name="brazilian_cpf",
+            regex=r'\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b',
+            score=0.95
+        )
+        brazilian_cpf_recognizer = PatternRecognizer(
+            supported_entity="BRAZILIAN_CPF",
+            patterns=[brazilian_cpf_pattern],
+            context=["CPF", "cadastro", "brasil", "brazil"]
+        )
+        custom_recognizers.append(brazilian_cpf_recognizer)
+        
+        # Chinese ID (18 digits - very specific)
+        chinese_id_pattern = Pattern(
+            name="chinese_id",
+            regex=r'\b\d{18}\b',
+            score=0.9
+        )
+        chinese_id_recognizer = PatternRecognizer(
+            supported_entity="CHINESE_ID",
+            patterns=[chinese_id_pattern],
+            context=["ID", "身份证", "China", "chinese"]
+        )
+        custom_recognizers.append(chinese_id_recognizer)
+        
+        # German Steuernummer (Tax ID)
+        german_steuernummer_pattern = Pattern(
+            name="german_steuernummer",
+            regex=r'\b\d{2}[-\s]?\d{2,3}[-\s]?\d{3,4}[-\s]?\d{1}\b',
+            score=0.85
+        )
+        german_steuernummer_recognizer = PatternRecognizer(
+            supported_entity="GERMAN_STEUERNUMMER",
+            patterns=[german_steuernummer_pattern],
+            context=["Steuernummer", "tax", "germany", "deutsch"]
+        )
+        custom_recognizers.append(german_steuernummer_recognizer)
+        
+        # Spanish DNI
+        spanish_dni_pattern = Pattern(
+            name="spanish_dni",
+            regex=r'\b\d{8}-?[A-Z]\b',
+            score=0.95
+        )
+        spanish_dni_recognizer = PatternRecognizer(
+            supported_entity="SPANISH_DNI",
+            patterns=[spanish_dni_pattern],
+            context=["DNI", "españa", "spain"]
+        )
+        custom_recognizers.append(spanish_dni_recognizer)
+        
+        # French INSEE
+        french_insee_pattern = Pattern(
+            name="french_insee",
+            regex=r'\b\d{1}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{3}[-\s]?\d{3}\b',
+            score=0.9
+        )
+        french_insee_recognizer = PatternRecognizer(
+            supported_entity="FRENCH_INSEE",
+            patterns=[french_insee_pattern],
+            context=["INSEE", "numéro", "france", "français"]
+        )
+        custom_recognizers.append(french_insee_recognizer)
+        
+        # Italian Codice Fiscale
+        italian_cf_pattern = Pattern(
+            name="italian_cf",
+            regex=r'\b[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\b',
+            score=0.95
+        )
+        italian_cf_recognizer = PatternRecognizer(
+            supported_entity="ITALIAN_CF",
+            patterns=[italian_cf_pattern],
+            context=["Codice Fiscale", "CF", "italy", "italiano"]
+        )
+        custom_recognizers.append(italian_cf_recognizer)
+        
+        # Polish PESEL
+        polish_pesel_pattern = Pattern(
+            name="polish_pesel",
+            regex=r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}\d{3}[0-9]\b',
+            score=0.95
+        )
+        polish_pesel_recognizer = PatternRecognizer(
+            supported_entity="POLISH_PESEL",
+            patterns=[polish_pesel_pattern],
+            context=["PESEL", "poland", "polski"]
+        )
+        custom_recognizers.append(polish_pesel_recognizer)
+        
+        # Australian TFN (Tax File Number)
+        australian_tfn_pattern = Pattern(
+            name="australian_tfn",
+            regex=r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',
+            score=0.85
+        )
+        australian_tfn_recognizer = PatternRecognizer(
+            supported_entity="AUSTRALIAN_TFN",
+            patterns=[australian_tfn_pattern],
+            context=["TFN", "tax file", "australia"]
+        )
+        custom_recognizers.append(australian_tfn_recognizer)
+        
+        # South Korean RRN (Resident Registration Number)
+        south_korean_rrn_pattern = Pattern(
+            name="south_korean_rrn",
+            regex=r'\b\d{6}[-]?\d{7}\b',
+            score=0.9
+        )
+        south_korean_rrn_recognizer = PatternRecognizer(
+            supported_entity="SOUTH_KOREAN_RRN",
+            patterns=[south_korean_rrn_pattern],
+            context=["RRN", "korea", "korean", "주민등록"]
+        )
+        custom_recognizers.append(south_korean_rrn_recognizer)
+        
+        # Japanese My Number
+        japanese_my_number_pattern = Pattern(
+            name="japanese_my_number",
+            regex=r'\b\d{12}\b',
+            score=0.8
+        )
+        japanese_my_number_recognizer = PatternRecognizer(
+            supported_entity="JAPANESE_MY_NUMBER",
+            patterns=[japanese_my_number_pattern],
+            context=["My Number", "マイナンバー", "japan"]
+        )
+        custom_recognizers.append(japanese_my_number_recognizer)
+        
+        # Singapore NRIC
+        singapore_nric_pattern = Pattern(
+            name="singapore_nric",
+            regex=r'\b[STG]\d{7}[A-Z]\b',
+            score=0.95
+        )
+        singapore_nric_recognizer = PatternRecognizer(
+            supported_entity="SINGAPORE_NRIC",
+            patterns=[singapore_nric_pattern],
+            context=["NRIC", "singapore", "identity"]
+        )
+        custom_recognizers.append(singapore_nric_recognizer)
+        
+        # UAE Civil Number
+        uae_civil_pattern = Pattern(
+            name="uae_civil",
+            regex=r'\b784[-]?\d{4}[-]?\d{7}[-]?\d{1}\b',
+            score=0.95
+        )
+        uae_civil_recognizer = PatternRecognizer(
+            supported_entity="UAE_CIVIL_NUMBER",
+            patterns=[uae_civil_pattern],
+            context=["Civil", "UAE", "emirates"]
+        )
+        custom_recognizers.append(uae_civil_recognizer)
+        
+        # South African ID
+        sa_id_pattern = Pattern(
+            name="sa_id",
+            regex=r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9]\d{2}\b',
+            score=0.95
+        )
+        sa_id_recognizer = PatternRecognizer(
+            supported_entity="SOUTH_AFRICAN_ID",
+            patterns=[sa_id_pattern],
+            context=["ID", "south africa", "ZA"]
+        )
+        custom_recognizers.append(sa_id_recognizer)
+        
         logger.info(f"Created {len(custom_recognizers)} custom recognizers for compliance")
+        
         
     except Exception as e:
         logger.error(f"Error creating custom recognizers: {e}")
@@ -551,6 +1133,17 @@ def fallback_pii_detection(text: str, pseudonym: Optional[str] = None) -> List[D
                 if overlaps_existing:
                     continue
                 
+                # Get context around the match
+                context_start = max(0, start - 50)
+                context_end = min(len(text), end + 50)
+                context = text[context_start:context_end]
+                matched_text = match.group()
+                
+                # Check if this entity should be anonymized
+                if not should_anonymize_entity(entity_type, matched_text, context):
+                    logger.debug(f"Skipping excluded entity in fallback: {entity_type} = '{matched_text}'")
+                    continue
+                
                 # Adjust confidence based on entity type criticality (HIPAA)
                 confidence = 0.5  # Default
                 if entity_type in ['SSN', 'MEDICAL_RECORD_NUMBER', 'DATE_OF_BIRTH', 'AGE_OVER_89', 'HEALTH_PLAN_NUMBER']:
@@ -562,7 +1155,7 @@ def fallback_pii_detection(text: str, pseudonym: Optional[str] = None) -> List[D
                     'entity_type': entity_type,
                     'start': start,
                     'end': end,
-                    'text': match.group(),
+                    'text': matched_text,
                     'score': confidence,
                     'method': 'fallback_regex'
                 })
@@ -728,9 +1321,13 @@ async def anonymize(request: AnonymizeRequest):
                     score_threshold=0.7
                 )
                 
-                # Filter out entities that overlap with pseudonym
+                # Filter out entities that:
+                # 1. Overlap with pseudonym
+                # 2. Are in the excluded list (e.g., generic DATE entities)
                 for result in results:
-                    # Check overlap with protected ranges
+                    entity_text = request.text[result.start:result.end]
+                    
+                    # Check overlap with protected ranges (pseudonym)
                     overlaps = any(
                         not (result.end <= start or result.start >= end)
                         for start, end in protected_ranges
@@ -738,20 +1335,31 @@ async def anonymize(request: AnonymizeRequest):
                     
                     # Check if entity contains pseudonym
                     if request.pseudonym:
-                        entity_text = request.text[result.start:result.end]
                         if request.pseudonym.lower() in entity_text.lower():
                             overlaps = True
                     
-                    if not overlaps:
-                        detected_entities.append({
-                            'entity_type': result.entity_type,
-                            'start': result.start,
-                            'end': result.end,
-                            'score': result.score,
-                            'text': request.text[result.start:result.end]
-                        })
+                    if overlaps:
+                        continue
+                    
+                    # Get context around the entity (50 chars before and after)
+                    context_start = max(0, result.start - 50)
+                    context_end = min(len(request.text), result.end + 50)
+                    context = request.text[context_start:context_end]
+                    
+                    # Check if this entity should be anonymized
+                    if not should_anonymize_entity(result.entity_type, entity_text, context):
+                        logger.debug(f"Skipping excluded entity: {result.entity_type} = '{entity_text}'")
+                        continue
+                    
+                    detected_entities.append({
+                        'entity_type': result.entity_type,
+                        'start': result.start,
+                        'end': result.end,
+                        'score': result.score,
+                        'text': entity_text
+                    })
                 
-                logger.info(f"ML-based detection found {len(detected_entities)} entities")
+                logger.info(f"ML-based detection found {len(detected_entities)} entities (after filtering excluded types)")
                 
             except Exception as e:
                 logger.error(f"ML-based detection failed: {e}, using fallback")
@@ -890,6 +1498,15 @@ async def detect(request: DetectRequest):
                         
                         # Skip if contains pseudonym
                         if request.pseudonym and request.pseudonym.lower() in entity_text.lower():
+                            continue
+                        
+                        # Get context around the entity
+                        context_start = max(0, result.start - 50)
+                        context_end = min(len(request.text), result.end + 50)
+                        context = request.text[context_start:context_end]
+                        
+                        # Check if this entity should be anonymized (skip excluded types)
+                        if not should_anonymize_entity(result.entity_type, entity_text, context):
                             continue
                         
                         entities.append({

@@ -1,6 +1,10 @@
 """
 Test file demonstrating HIPAA, ISO 27001, and SOC 2 compliance
 Tests comprehensive PII/PHI detection and anonymization
+
+KEY BEHAVIOR:
+- Birth dates (DOB, date of birth, born on) ARE anonymized
+- Other dates (appointment dates, event dates, etc.) are PRESERVED
 """
 
 import requests
@@ -11,6 +15,21 @@ API_URL = "http://localhost:8080"
 
 # Test cases covering HIPAA, ISO, SOC2 requirements
 test_cases = [
+    {
+        "name": "CRITICAL: Birth Date vs Other Dates - Only DOB should be anonymized",
+        "text": """
+        Patient: John Smith
+        DOB: 05/15/1980
+        Appointment Date: 03/20/2024
+        Last Visit: 01/15/2024
+        Next Appointment: 04/10/2024
+        Born on 05/15/1980 in New York
+        Email: john@example.com
+        """,
+        "expected_behavior": "ONLY DOB and 'Born on' date should be anonymized. Appointment dates should be preserved.",
+        "expected_entities": ["PERSON", "DATE_OF_BIRTH", "EMAIL_ADDRESS"],
+        "should_preserve": ["03/20/2024", "01/15/2024", "04/10/2024"]
+    },
     {
         "name": "HIPAA PHI - Medical Record with DOB and Age",
         "text": """
@@ -84,14 +103,19 @@ test_cases = [
         "expected_entities": ["PERSON", "BIOMETRIC_ID", "GENETIC_MARKER"]
     },
     {
-        "name": "Multiple Dates (HIPAA - All dates must be protected)",
+        "name": "CRITICAL: Only Birth Dates Anonymized - Other Dates Preserved",
         "text": """
         Admission Date: 01/15/2024
         Discharge Date: 01/20/2024
         Follow-up: 02/15/2024
         Birth Date: 06/12/1975
+        Date of Birth: 1990-03-25
+        The event is scheduled for 12/25/2024
+        Meeting on 2024-06-15 at 3pm
         """,
-        "expected_entities": ["DATE", "DATE_OF_BIRTH"]
+        "expected_behavior": "ONLY 'Birth Date' and 'Date of Birth' should be anonymized. All other dates preserved.",
+        "should_preserve": ["01/15/2024", "01/20/2024", "02/15/2024", "12/25/2024", "2024-06-15"],
+        "should_anonymize": ["06/12/1975", "1990-03-25"]
     },
     {
         "name": "Complex Medical Record (Full PHI)",
@@ -196,6 +220,24 @@ def test_anonymize_endpoint():
                 print(f"\n   Anonymized {len(result['anonymized_spans'])} entities:")
                 for span in result['anonymized_spans']:
                     print(f"   - {span['entity_type']}: '{span['original']}' → '{span['replacement']}'")
+                
+                # Check for preserved dates (should NOT be anonymized)
+                if "should_preserve" in test_case:
+                    print(f"\n   Checking preserved dates:")
+                    for date_str in test_case["should_preserve"]:
+                        if date_str in result['anonymized_text']:
+                            print(f"   ✅ Date '{date_str}' correctly PRESERVED")
+                        else:
+                            print(f"   ❌ Date '{date_str}' was incorrectly anonymized!")
+                
+                # Check for anonymized dates (SHOULD be anonymized)
+                if "should_anonymize" in test_case:
+                    print(f"\n   Checking anonymized birth dates:")
+                    for date_str in test_case["should_anonymize"]:
+                        if date_str not in result['anonymized_text']:
+                            print(f"   ✅ Birth date '{date_str}' correctly ANONYMIZED")
+                        else:
+                            print(f"   ❌ Birth date '{date_str}' was NOT anonymized!")
                 
                 if "pseudonym" in test_case:
                     pseudonym = test_case["pseudonym"]
