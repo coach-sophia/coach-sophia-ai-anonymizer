@@ -77,9 +77,10 @@ This enterprise-grade service uses Microsoft Presidio with custom recognizers to
 - Social Security Numbers (SSN)
 - Passport Numbers, Driver License Numbers
 - Tax IDs, National IDs
+- **Indian IDs: PAN (Permanent Account Number), Aadhaar, Indian Passport**
 
 ### Medical/Health Identifiers (HIPAA PHI)
-- Medical Record Numbers (MRN)
+- **Medical Record Numbers (MRN) - Medical Record Number**
 - Health Plan/Insurance Numbers
 - Prescription Numbers
 - NPI (National Provider Identifier)
@@ -420,6 +421,9 @@ console.log(data.anonymized_text); // "Credit Card: payment"
 - [HIPAA Privacy Rule](https://www.hhs.gov/hipaa/for-professionals/privacy/index.html)
 - [ISO 27001 Standard](https://www.iso.org/isoiec-27001-information-security.html)
 - [SOC 2 Compliance](https://www.aicpa.org/interestareas/frc/assuranceadvisoryservices/aicpasoc2report)
+- **[PAN & MRN Anonymization Guide](./PAN_MRN_ANONYMIZATION.md)** - Detailed documentation for Permanent Account Number and Medical Record Number handling
+- [Enhancement Summary](./ENHANCEMENT_SUMMARY.md) - Implementation details
+- [Compliance Analysis](./COMPLIANCE_ANALYSIS.md) - Full compliance mapping
 
 ## 🤝 Integration Examples
 
