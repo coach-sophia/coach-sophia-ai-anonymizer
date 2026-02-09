@@ -5,6 +5,9 @@ Tests comprehensive PII/PHI detection and anonymization
 KEY BEHAVIOR:
 - Birth dates (DOB, date of birth, born on) ARE anonymized
 - Other dates (appointment dates, event dates, etc.) are PRESERVED
+- Replacements use [redacted X] format (e.g., [redacted name], [redacted location])
+- PERSON entities use first initial (e.g., "John Smith" -> "J")
+- ORG entities with school keywords use [redacted school]
 """
 
 import requests
@@ -28,7 +31,8 @@ test_cases = [
         """,
         "expected_behavior": "ONLY DOB and 'Born on' date should be anonymized. Appointment dates should be preserved.",
         "expected_entities": ["PERSON", "DATE_OF_BIRTH", "EMAIL_ADDRESS"],
-        "should_preserve": ["03/20/2024", "01/15/2024", "04/10/2024"]
+        "should_preserve": ["03/20/2024", "01/15/2024", "04/10/2024"],
+        "expected_replacements": ["[redacted email]"]
     },
     {
         "name": "HIPAA PHI - Medical Record with DOB and Age",
@@ -51,7 +55,8 @@ test_cases = [
         SSN: 123-45-6789
         Address: 123 Main Street, Springfield
         """,
-        "expected_entities": ["PERSON", "AGE_OVER_89", "DATE", "SSN", "LOCATION"]
+        "expected_entities": ["PERSON", "AGE_OVER_89", "SSN", "LOCATION"],
+        "expected_replacements": ["[redacted SSN]", "[redacted location]"]
     },
     {
         "name": "Gender and Demographics (Sensitive Personal Data)",
@@ -164,7 +169,86 @@ test_cases = [
         """,
         "expected_behavior": "Real company names with legal suffixes should be anonymized",
         "should_anonymize": ["Google Inc.", "Microsoft Corporation", "Tata Consultancy Services Ltd."]
-    }
+    },
+    # ===== NEW TEST CASES for Presidio Full Power =====
+    {
+        "name": "ORG Detection - Schools via ML",
+        "text": """
+        My child attends Lincoln High School and previously went to St Mary's Academy.
+        I graduated from Harvard University.
+        """,
+        "expected_behavior": "Schools should be detected as ORG and replaced with [redacted school]",
+        "expected_replacements": ["[redacted school]"],
+        "should_not_contain": ["Lincoln High School", "St Mary's Academy", "Harvard University"]
+    },
+    {
+        "name": "ORG Detection - Companies via ML",
+        "text": """
+        I work at Amazon and my partner works at Goldman Sachs.
+        """,
+        "expected_behavior": "Company names should be detected as ORG and replaced with [redacted organization]",
+        "expected_replacements": ["[redacted organization]"],
+        "should_not_contain": ["Amazon", "Goldman Sachs"]
+    },
+    {
+        "name": "LOCATION Detection - Cities and Addresses",
+        "text": """
+        I live in San Francisco and commute to Oakland.
+        My address is 4217 Piedmont Avenue, Oakland, CA 94611.
+        """,
+        "expected_behavior": "Locations should be detected and replaced with [redacted location] or [redacted zip]",
+        "expected_replacements": ["[redacted location]"],
+        "should_not_contain": ["San Francisco", "Oakland", "4217 Piedmont Avenue"]
+    },
+    {
+        "name": "PERSON Detection - First Initial Replacement",
+        "text": """
+        My therapist Dr. Sarah Williams recommended I talk to you.
+        My friend Jose Garcia also suggested coaching.
+        """,
+        "expected_behavior": "Names should be replaced with first initial (S, J)",
+        "should_not_contain": ["Sarah Williams", "Jose Garcia"]
+    },
+    {
+        "name": "Supplementary Regex - ZIP Codes and City,State",
+        "text": """
+        Please send it to Oakland, CA 94611.
+        My previous ZIP was 10001-1234.
+        """,
+        "expected_behavior": "ZIP codes and City,ST patterns should be detected by supplementary regex",
+        "should_not_contain": ["94611", "10001-1234"]
+    },
+    {
+        "name": "Supplementary Regex - Street Addresses",
+        "text": """
+        My office is at 123 Main Street.
+        She lives at 4500 Broadway Avenue, Apt 3B.
+        """,
+        "expected_behavior": "Street addresses should be detected by supplementary regex",
+        "should_not_contain": ["123 Main Street", "4500 Broadway Avenue"]
+    },
+    {
+        "name": "Coaching Domain - Common Words Not PII",
+        "text": """
+        My coaching session was great today. The mindfulness practice really helped.
+        I feel more resilience after therapy. My wellness has improved.
+        """,
+        "expected_behavior": "Coaching domain words should NOT be anonymized",
+        "should_preserve": ["coaching", "mindfulness", "resilience", "therapy", "wellness"]
+    },
+    {
+        "name": "[redacted X] Format Verification",
+        "text": """
+        John Smith lives at 123 Oak Drive, Oakland, CA 94612.
+        Email: john@example.com, Phone: 555-123-4567, SSN: 123-45-6789
+        He works at Acme Corp. and attended Stanford University.
+        """,
+        "expected_behavior": "All replacements should use [redacted X] format",
+        "expected_replacements": [
+            "[redacted email]", "[redacted phone]", "[redacted SSN]",
+            "[redacted location]"
+        ]
+    },
 ]
 
 def test_detect_endpoint():
@@ -212,6 +296,9 @@ def test_anonymize_endpoint():
     print("TESTING ANONYMIZATION ENDPOINT")
     print("="*80)
     
+    passed = 0
+    failed = 0
+    
     for i, test_case in enumerate(test_cases, 1):
         print(f"\n[Test {i}] {test_case['name']}")
         print("-" * 80)
@@ -229,46 +316,88 @@ def test_anonymize_endpoint():
             
             if response.status_code == 200:
                 result = response.json()
+                test_passed = True
                 
                 print(f"Original text (first 100 chars):")
                 print(f"   {test_case['text'][:100]}...")
                 
-                print(f"\n✅ Anonymized text:")
+                print(f"\n   Anonymized text:")
                 print(f"   {result['anonymized_text']}")
                 
                 print(f"\n   Anonymized {len(result['anonymized_spans'])} entities:")
                 for span in result['anonymized_spans']:
-                    print(f"   - {span['entity_type']}: '{span['original']}' → '{span['replacement']}'")
+                    print(f"   - {span['entity_type']}: '{span['original']}' -> '{span['replacement']}'")
                 
-                # Check for preserved dates (should NOT be anonymized)
+                # Check for preserved content (should NOT be anonymized)
                 if "should_preserve" in test_case:
-                    print(f"\n   Checking preserved dates:")
-                    for date_str in test_case["should_preserve"]:
-                        if date_str in result['anonymized_text']:
-                            print(f"   ✅ Date '{date_str}' correctly PRESERVED")
+                    print(f"\n   Checking preserved content:")
+                    for text_str in test_case["should_preserve"]:
+                        if text_str in result['anonymized_text']:
+                            print(f"   PASS '{text_str}' correctly PRESERVED")
                         else:
-                            print(f"   ❌ Date '{date_str}' was incorrectly anonymized!")
+                            print(f"   FAIL '{text_str}' was incorrectly anonymized!")
+                            test_passed = False
                 
-                # Check for anonymized dates (SHOULD be anonymized)
+                # Check for anonymized content (SHOULD be anonymized / removed)
                 if "should_anonymize" in test_case:
-                    print(f"\n   Checking anonymized birth dates:")
-                    for date_str in test_case["should_anonymize"]:
-                        if date_str not in result['anonymized_text']:
-                            print(f"   ✅ Birth date '{date_str}' correctly ANONYMIZED")
+                    print(f"\n   Checking anonymized content:")
+                    for text_str in test_case["should_anonymize"]:
+                        if text_str not in result['anonymized_text']:
+                            print(f"   PASS '{text_str}' correctly ANONYMIZED")
                         else:
-                            print(f"   ❌ Birth date '{date_str}' was NOT anonymized!")
+                            print(f"   FAIL '{text_str}' was NOT anonymized!")
+                            test_passed = False
+                
+                # Check content that should NOT appear in anonymized output
+                if "should_not_contain" in test_case:
+                    print(f"\n   Checking removed PII:")
+                    for text_str in test_case["should_not_contain"]:
+                        if text_str not in result['anonymized_text']:
+                            print(f"   PASS '{text_str}' correctly removed")
+                        else:
+                            print(f"   FAIL '{text_str}' still present in output!")
+                            test_passed = False
+                
+                # Check that expected replacement formats appear
+                if "expected_replacements" in test_case:
+                    print(f"\n   Checking replacement formats:")
+                    for repl in test_case["expected_replacements"]:
+                        if repl in result['anonymized_text']:
+                            print(f"   PASS '{repl}' found in output")
+                        else:
+                            # Also check spans for the replacement
+                            span_repls = [s['replacement'] for s in result['anonymized_spans']]
+                            if repl in span_repls:
+                                print(f"   PASS '{repl}' found in spans")
+                            else:
+                                print(f"   FAIL '{repl}' not found in output or spans!")
+                                test_passed = False
                 
                 if "pseudonym" in test_case:
                     pseudonym = test_case["pseudonym"]
                     if pseudonym in result['anonymized_text']:
-                        print(f"\n   ✅ Pseudonym '{pseudonym}' preserved successfully")
+                        print(f"\n   PASS Pseudonym '{pseudonym}' preserved successfully")
                     else:
-                        print(f"\n   ⚠️  Pseudonym '{pseudonym}' not found in result")
+                        print(f"\n   FAIL Pseudonym '{pseudonym}' not found in result")
+                        test_passed = False
+                
+                if test_passed:
+                    passed += 1
+                    print(f"\n   === TEST PASSED ===")
+                else:
+                    failed += 1
+                    print(f"\n   === TEST FAILED ===")
             else:
-                print(f"❌ Error: {response.status_code} - {response.text}")
+                print(f"FAIL Error: {response.status_code} - {response.text}")
+                failed += 1
                 
         except Exception as e:
-            print(f"❌ Exception: {e}")
+            print(f"FAIL Exception: {e}")
+            failed += 1
+    
+    print(f"\n{'='*80}")
+    print(f"ANONYMIZATION RESULTS: {passed} passed, {failed} failed out of {len(test_cases)} tests")
+    print(f"{'='*80}")
 
 def test_health_endpoint():
     """Test the /health endpoint"""

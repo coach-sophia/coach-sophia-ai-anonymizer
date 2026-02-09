@@ -65,7 +65,7 @@ import os
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig, RecognizerResult
+# OperatorConfig and RecognizerResult no longer needed - using custom apply_replacements()
 import re
 import logging
 from functools import wraps
@@ -192,6 +192,28 @@ FALLBACK_PATTERNS = {
     # - Patterns matching just N digits without specific format (e.g., \b\d{9}\b)
     # - These cause too many false positives (order numbers, tracking IDs, etc.)
     # - If needed, these should require context keywords like "ID:", "national id", etc.
+    
+    # ========== SUPPLEMENTARY PATTERNS (ported from SPA regex detectors) ==========
+    
+    # Street addresses (US formats)
+    'STREET_ADDRESS': r'\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Boulevard|Blvd|Drive|Dr|Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|Parkway|Pkwy|Highway|Hwy)\.?\b',
+    'APT_UNIT': r'\b(?:Apt|Apartment|Unit|Suite|Ste|#)\s*[A-Za-z0-9]+\b',
+    
+    # ZIP codes (US)
+    'ZIP_CODE': r'\b\d{5}(?:-\d{4})?\b',
+    
+    # City, State patterns (e.g., "Oakland, CA", "New York, NY")
+    'CITY_STATE': r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b',
+    
+    # State abbreviations near ZIP codes or punctuation
+    'STATE_ABBREVIATION': r'\b(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b(?=\s+\d{5}|,|\.|$)',
+    
+    # School/institution name patterns (common naming conventions)
+    'SCHOOL_NAME': r'\bSt\.?\s+[A-Z][a-z]+(?:\'s)?\s+(?:School|Academy|College|Institute|Grammar|Prep|Preparatory)\b',
+    'SCHOOL_NAME_2': r'\bSaint\s+[A-Z][a-z]+(?:\'s)?\s+(?:School|Academy|College|Institute|Grammar|Prep|Preparatory)\b',
+    'SCHOOL_NAME_3': r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+(?:High\s+)?(?:School|Academy|College|University|Institute|Grammar|Prep|Preparatory)\b',
+    'SCHOOL_NAME_4': r'\b(?:School|University|College|Institute|Academy)\s+of\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\b',
+    'SCHOOL_NAME_5': r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+(?:Elementary|Middle|Junior|Senior)\s*(?:High)?\s*(?:School)?\b',
 }
 
 # Initialize FastAPI app
@@ -308,224 +330,119 @@ async def startup_event():
             import asyncio
             await asyncio.sleep(2 ** retry_count)  # Exponential backoff
 
-# Enhanced generic noun mappings - Contextually relevant replacements
-# Each replacement is chosen to maintain sentence readability while removing PII
-GENERIC_NOUNS = {
-    # Personal Identifiers - Use natural language nouns
-    'PERSON': '[Person]',
-    'NAME': '[Person]',
-    'PATIENT_NAME': '[Patient]',
-    
-    # Contact Information - Clear descriptive placeholders
-    'EMAIL_ADDRESS': '[email address]',
-    'PHONE_NUMBER': '[phone number]',
-    'FAX_NUMBER': '[fax number]',
-    'URL': '[website]',
-    'IP_ADDRESS': '[IP address]',
-    
-    # Location Data - Preserve context
-    'LOCATION': '[location]',
-    'GPE': '[place]',
-    'LOC': '[location]',
-    'ADDRESS': '[address]',
-    'STREET_ADDRESS': '[street address]',
-    'CITY': '[city]',
-    'STATE': '[state]',
-    'ZIP_CODE': '[zip code]',
-    'COUNTRY': '[country]',
-    
-    # Organizations - Descriptive
-    'ORGANIZATION': '[organization]',
-    'ORG': '[organization]',
-    'FACILITY': '[facility]',
-    'HOSPITAL': '[medical facility]',
-    
-    # Date of Birth ONLY - Other dates are preserved per user requirement
-    # Generic DATE and DATE_TIME from ML models are EXCLUDED from anonymization
-    'DATE_OF_BIRTH': '[birth date]',
-    'DOB': '[birth date]',
-    'BIRTHDAY': '[birth date]',
-    
-    # Age Information (HIPAA) - Descriptive
-    'AGE': '[age]',
-    'AGE_OVER_89': '[age]',
-    'AGE_GENERAL': '[age]',
-    
-    # Financial Information (SOC 2) - Clear placeholders
-    'CREDIT_CARD': '[credit card number]',
-    'IBAN_CODE': '[bank account]',
-    'ACCOUNT_NUMBER': '[account number]',
-    'ROUTING_NUMBER': '[routing number]',
-    'BANK_ACCOUNT': '[bank account]',
-    'SWIFT_CODE': '[bank code]',
-    
-    # Government IDs (HIPAA) - Descriptive placeholders
-    'SSN': '[social security number]',
-    'US_SSN': '[social security number]',
-    'US_PASSPORT': '[passport number]',
-    'US_DRIVER_LICENSE': '[driver license]',
-    'DRIVER_LICENSE': '[driver license]',
-    'PASSPORT': '[passport number]',
-    'TAX_ID': '[tax identifier]',
-    'NATIONAL_ID': '[national ID]',
-    
-    # Medical/Health Identifiers (HIPAA PHI) - Clear medical context
-    'MEDICAL_RECORD_NUMBER': '[medical record number]',
-    'HEALTH_PLAN_NUMBER': '[health plan ID]',
-    'PATIENT_ID': '[patient ID]',
-    'PRESCRIPTION_NUMBER': '[prescription number]',
-    'NPI_NUMBER': '[provider ID]',
-    'DEA_NUMBER': '[DEA number]',
-    'MEDICAL_LICENSE': '[medical license]',
-    'INSURANCE_NUMBER': '[insurance ID]',
-    'POLICY_NUMBER': '[policy number]',
-    'MEMBER_ID': '[member ID]',
-    
-    # Biometric & Physical Data (HIPAA) - Clear descriptions
-    'BIOMETRIC_ID': '[biometric data]',
-    'FINGERPRINT': '[biometric data]',
-    'RETINA_SCAN': '[biometric data]',
-    'FACIAL_RECOGNITION': '[biometric data]',
-    'GENETIC_MARKER': '[genetic data]',
-    'DNA_SEQUENCE': '[genetic data]',
-    
-    # Vehicle & Device Identifiers (HIPAA) - Descriptive
-    'VIN': '[vehicle identifier]',
-    'LICENSE_PLATE': '[license plate]',
-    'DEVICE_ID': '[device identifier]',
-    'SERIAL_NUMBER': '[serial number]',
-    'MAC_ADDRESS': '[device address]',
-    'IMEI': '[device identifier]',
-    
-    # Certificates & Licenses (HIPAA)
-    'CERTIFICATE_NUMBER': '[certificate number]',
-    'LICENSE_NUMBER': '[license number]',
-    
-    # Sensitive Personal Data (ISO 27001, GDPR) - Neutral placeholders
-    'GENDER': '[gender]',
-    'GENDER_EXPLICIT': '[gender]',
-    'ETHNICITY': '[demographic info]',
-    'RACE': '[demographic info]',
-    'RELIGION': '[religious affiliation]',
-    'SEXUAL_ORIENTATION': '[personal info]',
-    'MARITAL_STATUS': '[marital status]',
-    
-    # Security & Access (SOC 2) - Clear credential markers
-    'CRYPTO': '[crypto wallet]',
-    'CRYPTO_WALLET': '[crypto wallet]',
-    'API_KEY': '[API credential]',
-    'ACCESS_TOKEN': '[access token]',
-    'SECRET_KEY': '[secret key]',
-    'PASSWORD': '[password]',
-    'AUTH_TOKEN': '[auth token]',
-    'USERNAME': '[username]',
-    
-    # Indian-specific identifiers (HIPAA "Any other unique identifying number", ISO 27001)
-    'AADHAAR_NUMBER': '[Aadhaar number]',
-    'PAN_NUMBER': '[PAN number]',
-    'INDIAN_PASSPORT': '[passport number]',
-    'PASSPORT_NUMBER': '[passport number]',
-    'PAN': '[PAN number]',
-    
-    # Organization & Related Entities (ISO 27001)
-    'COMPANY_NAME': '[company name]',
-    'ORGANIZATION_NAME': '[organization name]',
-    'INSTITUTION_NAME': '[institution name]',
-    
-    # Vehicle & Insurance (HIPAA vehicle identifiers, ISO 27001)
-    'VEHICLE_REGISTRATION': '[vehicle registration]',
-    'INSURANCE_POLICY_NUMBER': '[policy number]',
-    'INSURANCE_POLICY': '[policy number]',
-    
-    # ========== INTERNATIONAL IDENTITY CARDS ==========
-    # All international IDs use a generic [national ID] placeholder
-    # North America
-    'CANADIAN_SIN': '[national ID]',
-    'MEXICAN_CURP': '[national ID]',
-    
-    # South America
-    'BRAZILIAN_CPF': '[national ID]',
-    'ARGENTINIAN_DNI': '[national ID]',
-    'CHILEAN_RUN': '[national ID]',
-    'COLOMBIAN_CEDULA': '[national ID]',
-    'VENEZUELAN_ID': '[national ID]',
-    
-    # Europe
-    'UK_NINO': '[national ID]',
-    'UK_NHS_NUMBER': '[health ID]',
-    'GERMAN_STEUERNUMMER': '[tax ID]',
-    'FRENCH_INSEE': '[national ID]',
-    'SPANISH_DNI': '[national ID]',
-    'SPANISH_NIE': '[national ID]',
-    'ITALIAN_CF': '[national ID]',
-    'DUTCH_BSN': '[national ID]',
-    'BELGIAN_ID': '[national ID]',
-    'POLISH_PESEL': '[national ID]',
-    'PORTUGUESE_NIC': '[national ID]',
-    'PORTUGUESE_NIF': '[tax ID]',
-    'CZECH_BIRTH_NUMBER': '[national ID]',
-    'DANISH_CPR': '[national ID]',
-    'FINNISH_PIN': '[national ID]',
-    'SWEDISH_PERSONNUMMER': '[national ID]',
-    'NORWEGIAN_FOEDSELS': '[national ID]',
-    'AUSTRIAN_PIN': '[national ID]',
-    'HUNGARIAN_ID': '[national ID]',
-    'GREEK_ID': '[national ID]',
-    'ROMANIAN_CNP': '[national ID]',
-    'BULGARIAN_EGN': '[national ID]',
-    'CROATIAN_OIB': '[national ID]',
-    'SLOVAK_BIRTH_NUMBER': '[national ID]',
-    'SLOVENIAN_EMSO': '[national ID]',
-    'ESTONIA_ID': '[national ID]',
-    'LATVIA_ID': '[national ID]',
-    'LITHUANIA_ID': '[national ID]',
-    'ICELAND_KENNITALA': '[national ID]',
-    'IRELAND_PPSN': '[national ID]',
-    
-    # Middle East & Central Asia
-    'UAE_CIVIL_NUMBER': '[national ID]',
-    'SAUDI_NATIONAL_ID': '[national ID]',
-    'ISRAELI_ID': '[national ID]',
-    'IRAN_NATIONAL_ID': '[national ID]',
-    'BAHRAIN_ID': '[national ID]',
-    'KUWAIT_CIVIL_ID': '[national ID]',
-    'IRAQ_NATIONAL_ID': '[national ID]',
-    
-    # Asia
-    'CHINESE_ID': '[national ID]',
-    'CHINESE_ID_OLD': '[national ID]',
-    'HONG_KONG_ID': '[national ID]',
-    'TAIWAN_ID': '[national ID]',
-    'JAPANESE_MY_NUMBER': '[national ID]',
-    'SOUTH_KOREAN_RRN': '[national ID]',
-    'SINGAPORE_NRIC': '[national ID]',
-    'MALAYSIAN_ID': '[national ID]',
-    'INDONESIAN_NIK': '[national ID]',
-    'THAI_ID': '[national ID]',
-    'VIETNAMESE_ID': '[national ID]',
-    'PHILIPPINE_PHILSYS': '[national ID]',
-    'PAKISTAN_CNIC': '[national ID]',
-    'NEPAL_CITIZENSHIP': '[national ID]',
-    'BANGLADESH_NID': '[national ID]',
-    'CAMBODIA_ID': '[national ID]',
-    
-    # Africa
-    'SOUTH_AFRICAN_ID': '[national ID]',
-    'NIGERIAN_NIN': '[national ID]',
-    'KENYAN_ID': '[national ID]',
-    'GHANAIAN_ID': '[national ID]',
-    'EGYPTIAN_ID': '[national ID]',
-    'MOROCCAN_ID': '[national ID]',
-    'ETHIOPIAN_ID': '[national ID]',
-    
-    # Oceania
-    'AUSTRALIAN_TFN': '[tax ID]',
-    'NEW_ZEALAND_IRD': '[tax ID]',
-    'NEW_ZEALAND_NHI': '[health ID]',
-    
-    # Default fallback
-    'DEFAULT': '[personal information]'
+# Replacement function - produces readable [redacted X] placeholders
+# Matches the SPA's getReadableReplacement() logic for consistency
+_STATIC_REPLACEMENTS = {
+    # Location
+    'LOCATION': '[redacted location]', 'GPE': '[redacted location]',
+    'LOC': '[redacted location]', 'STREET_ADDRESS': '[redacted location]',
+    'CITY_STATE': '[redacted location]', 'STATE_ABBREVIATION': '[redacted location]',
+    'APT_UNIT': '[redacted location]', 'ADDRESS': '[redacted location]',
+    'CITY': '[redacted location]', 'STATE': '[redacted location]',
+    'COUNTRY': '[redacted location]',
+    # Contact
+    'EMAIL_ADDRESS': '[redacted email]', 'PHONE_NUMBER': '[redacted phone]',
+    'FAX_NUMBER': '[redacted phone]',
+    # Age
+    'AGE': '[redacted age]', 'AGE_OVER_89': '[redacted age]', 'AGE_GENERAL': '[redacted age]',
+    # Financial
+    'CREDIT_CARD': '[redacted card]', 'IBAN_CODE': '[redacted account]',
+    'ACCOUNT_NUMBER': '[redacted account]', 'ROUTING_NUMBER': '[redacted account]',
+    'BANK_ACCOUNT': '[redacted account]', 'SWIFT_CODE': '[redacted account]',
+    # Government IDs
+    'SSN': '[redacted SSN]', 'US_SSN': '[redacted SSN]',
+    'US_PASSPORT': '[redacted ID]', 'US_DRIVER_LICENSE': '[redacted ID]',
+    'DRIVER_LICENSE': '[redacted ID]', 'PASSPORT': '[redacted ID]',
+    'PASSPORT_NUMBER': '[redacted ID]', 'TAX_ID': '[redacted ID]',
+    'NATIONAL_ID': '[redacted ID]',
+    # Network
+    'IP_ADDRESS': '[redacted IP]', 'URL': '[redacted URL]',
+    # ZIP
+    'ZIP_CODE': '[redacted zip]',
+    # DOB
+    'DATE_OF_BIRTH': '[redacted DOB]', 'DOB': '[redacted DOB]', 'BIRTHDAY': '[redacted DOB]',
+    # Medical
+    'MEDICAL_RECORD_NUMBER': '[redacted medical]', 'HEALTH_PLAN_NUMBER': '[redacted medical]',
+    'MEDICAL_RECORD': '[redacted medical]', 'PATIENT_ID': '[redacted medical]',
+    'PRESCRIPTION_NUMBER': '[redacted medical]', 'NPI_NUMBER': '[redacted medical]',
+    'DEA_NUMBER': '[redacted medical]', 'MEDICAL_LICENSE': '[redacted medical]',
+    'INSURANCE_NUMBER': '[redacted medical]', 'POLICY_NUMBER': '[redacted medical]',
+    'MEMBER_ID': '[redacted medical]', 'INSURANCE_POLICY_NUMBER': '[redacted medical]',
+    # Gender
+    'GENDER': '[redacted gender]', 'GENDER_EXPLICIT': '[redacted gender]',
+    # Biometric
+    'BIOMETRIC_ID': '[redacted]', 'GENETIC_MARKER': '[redacted]',
+    'FINGERPRINT': '[redacted]', 'DNA_SEQUENCE': '[redacted]',
+    # Vehicle & Device
+    'VIN': '[redacted vehicle]', 'LICENSE_PLATE': '[redacted vehicle]',
+    'VEHICLE_REGISTRATION': '[redacted vehicle]',
+    'DEVICE_ID': '[redacted device]', 'SERIAL_NUMBER': '[redacted device]',
+    'MAC_ADDRESS': '[redacted device]', 'IMEI': '[redacted device]',
+    # Certificates
+    'CERTIFICATE_NUMBER': '[redacted ID]', 'LICENSE_NUMBER': '[redacted ID]',
+    # Credentials
+    'API_KEY': '[redacted credential]', 'PASSWORD': '[redacted credential]',
+    'ACCESS_TOKEN': '[redacted credential]', 'SECRET_KEY': '[redacted credential]',
+    'AUTH_TOKEN': '[redacted credential]',
+    'USERNAME': '[redacted username]',
+    # Crypto
+    'CRYPTO': '[redacted]', 'CRYPTO_WALLET': '[redacted]',
+    # Demographics
+    'ETHNICITY': '[redacted]', 'RACE': '[redacted]',
+    'RELIGION': '[redacted]', 'SEXUAL_ORIENTATION': '[redacted]',
+    'MARITAL_STATUS': '[redacted]', 'NRP': '[redacted]',
+    # Indian IDs
+    'AADHAAR_NUMBER': '[redacted ID]', 'PAN_NUMBER': '[redacted ID]',
+    'PAN': '[redacted ID]', 'INDIAN_PASSPORT': '[redacted ID]',
 }
+
+# Map all international ID types to [redacted ID]
+for _id_type in [
+    'CANADIAN_SIN', 'MEXICAN_CURP', 'BRAZILIAN_CPF', 'ARGENTINIAN_DNI',
+    'CHILEAN_RUN', 'COLOMBIAN_CEDULA', 'VENEZUELAN_ID', 'UK_NINO',
+    'SPANISH_DNI', 'SPANISH_NIE', 'ITALIAN_CF', 'FINNISH_PIN',
+    'IRELAND_PPSN', 'HONG_KONG_ID', 'TAIWAN_ID', 'SINGAPORE_NRIC',
+    'PAKISTAN_CNIC', 'THAI_ID', 'UAE_CIVIL_NUMBER', 'NEW_ZEALAND_NHI',
+    'SOUTH_AFRICAN_ID', 'DUTCH_BSN', 'ISRAELI_ID', 'BAHRAIN_ID',
+    'CAMBODIA_ID', 'CROATIAN_OIB', 'NIGERIAN_NIN', 'ESTONIA_ID',
+    'LITHUANIA_ID', 'JAPANESE_MY_NUMBER', 'KUWAIT_CIVIL_ID',
+    'CHINESE_ID_OLD', 'INDONESIAN_NIK', 'CHINESE_ID', 'VIETNAMESE_ID',
+    'KENYAN_ID', 'ETHIOPIAN_ID', 'MOROCCAN_ID', 'BANGLADESH_NID',
+    'CZECH_BIRTH_NUMBER', 'SLOVAK_BIRTH_NUMBER', 'SAUDI_NATIONAL_ID',
+    'PORTUGUESE_NIF', 'SLOVENIAN_EMSO', 'EGYPTIAN_ID',
+    'AUSTRALIAN_TFN', 'NEW_ZEALAND_IRD',
+]:
+    _STATIC_REPLACEMENTS[_id_type] = '[redacted ID]'
+
+
+def get_replacement(entity_type: str, original_text: str = "") -> str:
+    """
+    Get readable replacement for an entity type.
+    Matches the SPA's getReadableReplacement() logic for consistency.
+    Uses [redacted X] format and first-initial for PERSON.
+    """
+    upper = entity_type.upper()
+
+    # PERSON: first initial (matching SPA's getReadableReplacement)
+    if upper in ('PERSON', 'PER', 'NAME', 'PATIENT_NAME'):
+        first = original_text.strip()[:1].upper() if original_text.strip() else ''
+        return first if first.isalpha() else '[redacted name]'
+
+    # ORG: school detection
+    if upper in ('ORG', 'ORGANIZATION', 'COMPANY_NAME', 'ORGANIZATION_NAME'):
+        lower = original_text.lower()
+        if any(kw in lower for kw in ['school', 'university', 'college', 'academy', "'s", 'st ']):
+            return '[redacted school]'
+        return '[redacted organization]'
+
+    if upper in ('INSTITUTION_NAME', 'INSTITUTION'):
+        return '[redacted institution]'
+
+    # School name from supplementary regex patterns
+    if upper.startswith('SCHOOL_NAME'):
+        return '[redacted school]'
+
+    return _STATIC_REPLACEMENTS.get(upper, '[redacted]')
 
 # Entity types to EXCLUDE from anonymization
 # These are detected by ML but should NOT be anonymized per user requirement
@@ -555,12 +472,6 @@ EXCLUDED_ENTITY_TYPES = {
     'LANGUAGE',       # Languages (spaCy) - PRESERVE (e.g., "English", "Spanish")
     'PRODUCT',        # Products (spaCy) - PRESERVE (e.g., "iPhone", "Windows")
     'FAC',            # Facilities/buildings (spaCy) - PRESERVE (e.g., "Empire State Building")
-    
-    # ===== ORGANIZATION (Often causes false positives) =====
-    # spaCy's ORG detection often incorrectly flags common words like "tech", "software"
-    # We use specific COMPANY_NAME patterns with legal suffixes instead
-    'ORG',            # Generic organization from spaCy - too many false positives
-    'ORGANIZATION',   # Generic organization - too many false positives
     
     # ===== OVERLY BROAD NUMERIC IDs (High false positive risk) =====
     # These patterns match common number sequences that are usually NOT national IDs
@@ -662,6 +573,9 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
         'seen', 'see', 'saw', 'evolve', 'evolved', 'evolving',
         # Common verbs that might be misdetected
         've', 'ive', "i've", 'have', 'has', 'had', 'been', 'being', 'be',
+        # Coaching/therapy domain terms
+        'coaching', 'therapy', 'session', 'practice', 'clinic',
+        'mindfulness', 'wellness', 'resilience', 'burnout',
     }
     
     # Check for common words - applies to PERSON and ORG entities
@@ -702,30 +616,26 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
         logger.debug(f"Skipping short numeric entity: '{entity_text_clean}'")
         return False
     
-    # Filter 6: For LOCATION/GPE, only anonymize if it looks like a specific address
-    # General place names (countries, states, cities) should be preserved
+    # Filter 6: For LOCATION/GPE, skip overly broad/generic location words
+    # but anonymize specific cities, addresses, etc.
     if entity_upper in ['LOCATION', 'GPE', 'LOC']:
-        # Check if this is a full address (has numbers + street indicators)
-        address_indicators = ['street', 'st.', 'avenue', 'ave.', 'road', 'rd.', 
-                            'boulevard', 'blvd.', 'lane', 'ln.', 'drive', 'dr.',
-                            'apt', 'apartment', 'suite', 'unit', 'floor', '#']
-        context_lower = context.lower()
-        
-        # Only anonymize if it looks like a specific street address
-        has_number = any(c.isdigit() for c in entity_text_clean)
-        has_address_word = any(ind in context_lower for ind in address_indicators)
-        
-        if not (has_number and has_address_word):
-            # This is likely just a city/state/country name - preserve it
-            logger.debug(f"Preserving general location (not address): '{entity_text_clean}'")
+        lower = entity_text_clean.lower()
+        BROAD_LOCATIONS = {
+            'earth', 'world', 'global', 'international',
+            'north', 'south', 'east', 'west',
+            'online', 'remote', 'virtual', 'home',
+        }
+        if lower in BROAD_LOCATIONS:
+            logger.debug(f"Skipping broad location: '{entity_text_clean}'")
+            return False
+        location_words = lower.split()
+        if all(word in COMMON_WORDS_NOT_PII for word in location_words):
+            logger.debug(f"Skipping common-word location: '{entity_text_clean}'")
             return False
     
     # All other entity types - anonymize
     return True
 
-def get_generic_noun(entity_type: str) -> str:
-    """Get contextually relevant generic noun for entity type."""
-    return GENERIC_NOUNS.get(entity_type.upper(), GENERIC_NOUNS['DEFAULT'])
 
 def create_custom_recognizers():
     """
@@ -1265,10 +1175,119 @@ def fallback_pii_detection(text: str, pseudonym: Optional[str] = None) -> List[D
     
     return detected_entities
 
-def safe_redact_text(text: str, entities: List[Dict], pseudonym: Optional[str] = None) -> Tuple[str, List[Dict]]:
+def supplementary_regex_detection(text: str, pseudonym: Optional[str] = None) -> List[Dict]:
     """
-    Safely redact text by replacing PII with generic nouns.
-    This is a fail-safe method that works even if the anonymizer fails.
+    Run supplementary regex patterns against text to catch PII that ML may miss.
+    This runs alongside ML detection (not just as a fallback).
+    Respects pseudonym protection.
+    """
+    detected_entities = []
+    protected_ranges = get_protected_ranges(text, pseudonym) if pseudonym else []
+    
+    # Track all detected ranges to avoid overlaps between regex patterns
+    detected_ranges = []
+    
+    for entity_type, pattern in FALLBACK_PATTERNS.items():
+        try:
+            # Use case-insensitive matching for text-based patterns
+            flags = re.IGNORECASE if any(keyword in entity_type for keyword in 
+                ['GENDER', 'DOB', 'MEDICAL', 'HEALTH', 'DEVICE', 'LICENSE', 'CERTIFICATE', 'PASSWORD', 'API',
+                 'STREET_ADDRESS', 'APT_UNIT', 'SCHOOL_NAME']) else 0
+            
+            for match in re.finditer(pattern, text, flags=flags):
+                start, end = match.span()
+                
+                # Skip if overlaps with pseudonym
+                overlaps_pseudonym = any(
+                    not (end <= p_start or start >= p_end)
+                    for p_start, p_end in protected_ranges
+                )
+                
+                if overlaps_pseudonym:
+                    continue
+                
+                # Skip if significantly overlaps with already detected entity
+                overlaps_existing = any(
+                    not (end <= d_start or start >= d_end)
+                    for d_start, d_end in detected_ranges
+                )
+                
+                if overlaps_existing:
+                    continue
+                
+                # Get context around the match
+                context_start = max(0, start - 50)
+                context_end = min(len(text), end + 50)
+                context = text[context_start:context_end]
+                matched_text = match.group()
+                
+                # Check if this entity should be anonymized
+                if not should_anonymize_entity(entity_type, matched_text, context):
+                    logger.debug(f"Skipping excluded entity in regex: {entity_type} = '{matched_text}'")
+                    continue
+                
+                # Adjust confidence based on entity type criticality (HIPAA)
+                confidence = 0.5  # Default
+                if entity_type in ['SSN', 'MEDICAL_RECORD_NUMBER', 'DATE_OF_BIRTH', 'AGE_OVER_89', 'HEALTH_PLAN_NUMBER']:
+                    confidence = 0.8  # High priority for HIPAA
+                elif entity_type in ['CREDIT_CARD', 'API_KEY', 'PASSWORD']:
+                    confidence = 0.75  # High priority for SOC2
+                elif entity_type.startswith('SCHOOL_NAME') or entity_type in ['CITY_STATE', 'STREET_ADDRESS']:
+                    confidence = 0.7
+                
+                detected_entities.append({
+                    'entity_type': entity_type,
+                    'start': start,
+                    'end': end,
+                    'text': matched_text,
+                    'score': confidence,
+                    'method': 'supplementary_regex'
+                })
+                
+                detected_ranges.append((start, end))
+                
+        except Exception as e:
+            logger.error(f"Error in supplementary regex pattern {entity_type}: {e}")
+            continue
+    
+    # Sort by start position for consistent processing
+    detected_entities.sort(key=lambda x: x['start'])
+    
+    return detected_entities
+
+
+def merge_entities(ml_entities: List[Dict], regex_entities: List[Dict]) -> List[Dict]:
+    """
+    Merge ML-detected entities with regex-detected entities.
+    ML entities take priority on overlap. Unlike the SPA's iterative merge,
+    this checks against the full growing merged list to prevent two regex
+    entities from different patterns overlapping each other.
+    """
+    merged = list(ml_entities)
+    
+    for regex_entity in regex_entities:
+        r_start = regex_entity['start']
+        r_end = regex_entity['end']
+        
+        # Check if this regex entity overlaps with any already-accepted entity
+        has_overlap = any(
+            not (r_end <= m['start'] or r_start >= m['end'])
+            for m in merged
+        )
+        
+        if not has_overlap:
+            merged.append(regex_entity)
+    
+    # Sort by start position
+    merged.sort(key=lambda x: x['start'])
+    return merged
+
+
+def apply_replacements(text: str, entities: List[Dict]) -> Tuple[str, List[Dict]]:
+    """
+    Apply readable replacements to text based on detected entities.
+    Replaces entities in reverse position order to preserve positions.
+    Returns (anonymized_text, spans) where spans use original-text positions.
     """
     if not entities:
         return text, []
@@ -1277,7 +1296,7 @@ def safe_redact_text(text: str, entities: List[Dict], pseudonym: Optional[str] =
     sorted_entities = sorted(entities, key=lambda x: x['start'], reverse=True)
     
     result_text = text
-    redacted_spans = []
+    spans = []
     
     for entity in sorted_entities:
         try:
@@ -1285,12 +1304,21 @@ def safe_redact_text(text: str, entities: List[Dict], pseudonym: Optional[str] =
             end = entity['end']
             entity_type = entity.get('entity_type', 'DEFAULT')
             original = text[start:end]
-            replacement = get_generic_noun(entity_type)
+            replacement = get_replacement(entity_type, original)
+            
+            # Skip if replacement is same as original (e.g., would be a no-op)
+            if replacement == original:
+                continue
+            
+            # Validate positions
+            if start < 0 or end > len(text) or start >= end:
+                logger.warning(f"Invalid entity positions for {entity_type}: {start}-{end}")
+                continue
             
             # Replace in text
             result_text = result_text[:start] + replacement + result_text[end:]
             
-            redacted_spans.append({
+            spans.append({
                 'start': start,
                 'end': end,
                 'entity_type': entity_type,
@@ -1298,15 +1326,18 @@ def safe_redact_text(text: str, entities: List[Dict], pseudonym: Optional[str] =
                 'replacement': replacement
             })
         except Exception as e:
-            logger.error(f"Error redacting entity at {entity.get('start', 'unknown')}: {e}")
-            # On error, redact with [REDACTED] to be safe
+            logger.error(f"Error replacing entity at {entity.get('start', 'unknown')}: {e}")
+            # On error, redact with [redacted] to be safe
             try:
-                result_text = result_text[:start] + "[REDACTED]" + result_text[end:]
+                result_text = result_text[:start] + "[redacted]" + result_text[end:]
             except:
                 pass
             continue
     
-    return result_text, redacted_spans
+    # Reverse spans to have them in document order (start to end)
+    spans.reverse()
+    
+    return result_text, spans
 
 @app.get("/")
 async def root():
@@ -1388,19 +1419,21 @@ async def health():
 @app.post("/anonymize", response_model=AnonymizeResponse)
 async def anonymize(request: AnonymizeRequest):
     """
-    Anonymize text with generic nouns, preserving pseudonym.
-    Features fail-safe compliance mechanisms:
-    - Falls back to regex detection if ML fails
-    - Uses safe redaction if anonymizer fails
-    - Never returns original text on error
+    Anonymize text with readable [redacted X] replacements, preserving pseudonym.
+    
+    Flow:
+    1. ML detection (Presidio AnalyzerEngine) for all entity types
+    2. Supplementary regex detection (always runs alongside ML)
+    3. Merge entities (ML wins on overlap)
+    4. Apply replacements using get_replacement() with [redacted X] format
+    
+    Fail-safe: Falls back to regex-only if ML fails. Never returns original text on error.
     """
     
-    anonymized_text = request.text
-    anonymized_spans = []
-    detected_entities = []
-    
     try:
-        # STEP 1: Detect PII entities (with fallback)
+        ml_entities = []
+        
+        # STEP 1: ML detection
         if analyzer:
             try:
                 # Get protected ranges for pseudonym
@@ -1413,9 +1446,7 @@ async def anonymize(request: AnonymizeRequest):
                     score_threshold=0.7
                 )
                 
-                # Filter out entities that:
-                # 1. Overlap with pseudonym
-                # 2. Are in the excluded list (e.g., generic DATE entities)
+                # Filter out entities that overlap pseudonym or are excluded
                 for result in results:
                     entity_text = request.text[result.start:result.end]
                     
@@ -1443,92 +1474,34 @@ async def anonymize(request: AnonymizeRequest):
                         logger.debug(f"Skipping excluded entity: {result.entity_type} = '{entity_text}'")
                         continue
                     
-                    detected_entities.append({
+                    ml_entities.append({
                         'entity_type': result.entity_type,
                         'start': result.start,
                         'end': result.end,
                         'score': result.score,
-                        'text': entity_text
+                        'text': entity_text,
+                        'method': 'ml'
                     })
                 
-                logger.info(f"ML-based detection found {len(detected_entities)} entities (after filtering excluded types)")
+                logger.info(f"ML detection found {len(ml_entities)} entities (after filtering)")
                 
             except Exception as e:
-                logger.error(f"ML-based detection failed: {e}, using fallback")
-                detected_entities = fallback_pii_detection(request.text, request.pseudonym)
+                logger.error(f"ML detection failed: {e}, will rely on regex only")
+                ml_entities = []
         else:
-            # No ML models available, use fallback
-            logger.warning("ML models not available, using fallback detection")
-            detected_entities = fallback_pii_detection(request.text, request.pseudonym)
+            logger.warning("ML models not available, using regex-only detection")
         
-        # STEP 2: Anonymize the detected entities (with fallback)
-        if anonymizer and detected_entities and analyzer:
-            try:
-                # Convert to RecognizerResult objects for anonymizer
-                filtered_results = []
-                for entity in detected_entities:
-                    try:
-                        result = RecognizerResult(
-                            entity_type=entity['entity_type'],
-                            start=entity['start'],
-                            end=entity['end'],
-                            score=entity.get('score', 0.5)
-                        )
-                        filtered_results.append(result)
-                    except Exception as e:
-                        logger.error(f"Error creating RecognizerResult: {e}")
-                        continue
-                
-                # Create operator configs
-                operators = {}
-                for result in filtered_results:
-                    if result.entity_type not in operators:
-                        operators[result.entity_type] = OperatorConfig(
-                            operator_name="replace",
-                            params={"new_value": get_generic_noun(result.entity_type)}
-                        )
-                
-                # Anonymize text
-                anonymized = anonymizer.anonymize(
-                    text=request.text,
-                    analyzer_results=filtered_results,
-                    operators=operators
-                )
-                
-                anonymized_text = anonymized.text
-                
-                # Build response spans
-                for item in anonymized.items:
-                    try:
-                        original_text = request.text[item.start:item.end]
-                        anonymized_spans.append({
-                            "start": item.start,
-                            "end": item.end,
-                            "entity_type": item.entity_type,
-                            "original": original_text,
-                            "replacement": get_generic_noun(item.entity_type)
-                        })
-                    except Exception as e:
-                        logger.error(f"Error building span: {e}")
-                        continue
-                
-                logger.info(f"Successfully anonymized using Presidio anonymizer")
-                
-            except Exception as e:
-                logger.error(f"Presidio anonymizer failed: {e}, using safe redaction")
-                anonymized_text, anonymized_spans = safe_redact_text(
-                    request.text, 
-                    detected_entities, 
-                    request.pseudonym
-                )
-        else:
-            # Use safe redaction fallback
-            logger.info(f"Using safe redaction fallback for {len(detected_entities)} entities")
-            anonymized_text, anonymized_spans = safe_redact_text(
-                request.text, 
-                detected_entities, 
-                request.pseudonym
-            )
+        # STEP 2: Supplementary regex detection (runs ALWAYS, not just on ML failure)
+        regex_entities = supplementary_regex_detection(request.text, request.pseudonym)
+        if regex_entities:
+            logger.info(f"Supplementary regex found {len(regex_entities)} entities")
+        
+        # STEP 3: Merge (ML takes priority on overlap)
+        all_entities = merge_entities(ml_entities, regex_entities)
+        logger.info(f"Total entities after merge: {len(all_entities)}")
+        
+        # STEP 4: Apply replacements using get_replacement()
+        anonymized_text, anonymized_spans = apply_replacements(request.text, all_entities)
         
         return AnonymizeResponse(
             anonymized_text=anonymized_text,
@@ -1540,13 +1513,12 @@ async def anonymize(request: AnonymizeRequest):
         # ULTIMATE FAIL-SAFE: Redact aggressively if everything fails
         logger.critical(f"Complete anonymization failure: {e}")
         
-        # Try fallback detection one more time
+        # Try regex-only detection one more time
         try:
             fallback_entities = fallback_pii_detection(request.text, request.pseudonym)
-            anonymized_text, anonymized_spans = safe_redact_text(
+            anonymized_text, anonymized_spans = apply_replacements(
                 request.text,
-                fallback_entities,
-                request.pseudonym
+                fallback_entities
             )
             logger.warning("Emergency fallback successful")
             
