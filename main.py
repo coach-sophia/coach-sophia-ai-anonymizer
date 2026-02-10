@@ -545,10 +545,12 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
     
     # Filter 1: Skip very short entities (likely false positives)
-    # EXCEPTION: LOCATION/GPE/LOC entities can be 2 chars (US state abbreviations: CA, NY, TX)
-    min_length = 2 if entity_upper in ('LOCATION', 'GPE', 'LOC') else 3
-    if len(entity_text_clean) < min_length:
-        logger.debug(f"Skipping short entity: '{entity_text_clean}' (type={entity_upper}, min={min_length})")
+    # Note: US state abbreviations (CA, NY) are 2 chars, but we DON'T need
+    # standalone detection — CityStateZipRecognizer catches them inside
+    # "City, CA 94611" patterns. Allowing 2-char LOCATION entities would
+    # cause false positives (spaCy tagging random 2-letter sequences as GPE).
+    if len(entity_text_clean) < 3:
+        logger.debug(f"Skipping short entity: '{entity_text_clean}'")
         return False
     
     # Filter 2: Skip common words that might be detected as PERSON or ORG
@@ -1356,15 +1358,18 @@ def merge_adjacent_locations(entities: List[Dict], text: str) -> List[Dict]:
     by collapsing nearby location entities (including the gap text between them)
     into one span that gets a single "[redacted location]" replacement.
     
-    Two location entities merge when:
-    - The gap between them is ≤ 20 characters
-    - The gap text contains only whitespace, commas, periods, hyphens, and digits
-      (typical address separators like ", " and trailing ZIP codes like " 94611")
+    Conservative merge rules (to avoid consuming non-address text):
+    - Gap between entities must be ≤ 6 characters (handles ", " and ", ")
+    - Gap must contain ONLY whitespace, commas, periods, hyphens (NO letters, NO digits)
+    - Merged result must not exceed 120 characters total
+    - After merging, trailing ZIP codes are absorbed if immediately adjacent
     """
     LOCATION_TYPES = {
         'LOCATION', 'GPE', 'LOC', 'STREET_ADDRESS', 'CITY_STATE',
         'STATE_ABBREVIATION', 'APT_UNIT', 'ZIP_CODE', 'ADDRESS',
     }
+    MAX_GAP = 6          # Only merge very close entities (", " = 2 chars, ",  " = 3)
+    MAX_MERGED_LEN = 120  # Safety cap on merged span length
     
     if not entities:
         return entities
@@ -1387,21 +1392,33 @@ def merge_adjacent_locations(entities: List[Dict], text: str) -> List[Dict]:
         gap_start = prev['end']
         gap_end = loc['start']
         gap_text = text[gap_start:gap_end]
+        new_span_len = loc['end'] - prev['start']
         
-        # Merge if gap is small and contains only address separators
-        # (whitespace, commas, periods, hyphens, digits — e.g. ", " or " 94611 ")
-        if (gap_end - gap_start) <= 20 and re.match(r'^[\s,.\-\d]*$', gap_text):
-            # Extend the previous merged entity to cover this one too
+        # Merge only if:
+        # 1. Gap is very small (≤ MAX_GAP chars)
+        # 2. Gap contains ONLY separator chars (no letters, no digits)
+        # 3. Merged span doesn't exceed MAX_MERGED_LEN
+        is_short_gap = (gap_end - gap_start) <= MAX_GAP
+        is_separator_only = bool(re.match(r'^[\s,.\-]*$', gap_text))
+        is_within_size_cap = new_span_len <= MAX_MERGED_LEN
+        
+        if is_short_gap and is_separator_only and is_within_size_cap:
             prev['end'] = loc['end']
             prev['text'] = text[prev['start']:prev['end']]
-            prev['entity_type'] = 'LOCATION'  # Normalize to LOCATION
+            prev['entity_type'] = 'LOCATION'
             prev['score'] = max(prev.get('score', 0), loc.get('score', 0))
             logger.debug(f"Merged adjacent locations: '{prev['text']}'")
         else:
             merged_locations.append(loc.copy())
+            if not is_short_gap:
+                logger.debug(f"Location merge skipped: gap too large ({gap_end - gap_start} > {MAX_GAP})")
+            elif not is_separator_only:
+                logger.debug(f"Location merge skipped: gap contains non-separator chars: '{gap_text}'")
+            elif not is_within_size_cap:
+                logger.debug(f"Location merge skipped: merged span too long ({new_span_len} > {MAX_MERGED_LEN})")
     
-    # After merging, extend each merged location to absorb trailing ZIP-like
-    # sequences that weren't independently detected (e.g. "94611" after "CA")
+    # After merging, extend each merged location to absorb a trailing ZIP-like
+    # sequence that wasn't independently detected (e.g. " 94611" after "CA")
     for loc in merged_locations:
         remaining = text[loc['end']:]
         zip_match = re.match(r'^[\s,]*(\d{5}(?:-\d{4})?)\b', remaining)
@@ -1412,12 +1429,11 @@ def merge_adjacent_locations(entities: List[Dict], text: str) -> List[Dict]:
                 not (new_end <= e['start'] or loc['end'] >= e['end'])
                 for e in non_locations
             )
-            if not overlaps_other:
+            # Guard: don't exceed size cap
+            if not overlaps_other and (new_end - loc['start']) <= MAX_MERGED_LEN:
                 loc['end'] = new_end
                 loc['text'] = text[loc['start']:loc['end']]
                 logger.debug(f"Extended location to absorb trailing ZIP: '{loc['text']}'")
-            else:
-                logger.debug(f"Skipped ZIP absorption — would overlap with non-location entity")
     
     result = non_locations + merged_locations
     result.sort(key=lambda x: x['start'])
@@ -1606,18 +1622,36 @@ async def anonymize(request: AnonymizeRequest):
                 protected_ranges = get_protected_ranges(request.text, request.pseudonym)
                 
                 # Analyze text for PII with confidence threshold
-                # NOTE: Presidio default is 0. We use 0.35 to catch most PII while
-                # filtering noise. PhoneRecognizer base=0.4, SpacyRecognizer base=0.85,
-                # pattern recognizers base varies. Context enhancement adds ~0.35.
+                # NOTE: Presidio default is 0. We use 0.5 as a balanced global floor.
+                # SpacyRecognizer gives ~0.85 for NER entities, PhoneRecognizer ~0.75
+                # with context. Our registered PatternRecognizers score 0.6-0.75.
+                # Per-type minimums are applied below for extra safety.
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.35
+                    score_threshold=0.5
                 )
+                
+                # Per-type minimum score thresholds.
+                # LOCATION/GPE from spaCy NER can produce false positives (common
+                # nouns misidentified as place names). Require higher confidence.
+                # Our CityStateZipRecognizer/StreetAddressRecognizer score 0.7+
+                # so real addresses pass easily.
+                TYPE_MIN_SCORES = {
+                    'LOCATION': 0.6,
+                    'GPE': 0.6,
+                    'LOC': 0.6,
+                }
                 
                 # Filter out entities that overlap pseudonym or are excluded
                 for result in results:
                     entity_text = request.text[result.start:result.end]
+                    
+                    # Per-type minimum score check
+                    min_score = TYPE_MIN_SCORES.get(result.entity_type, 0.5)
+                    if result.score < min_score:
+                        logger.debug(f"Skipping low-score entity: {result.entity_type} = '{entity_text}' (score={result.score:.2f} < {min_score})")
+                        continue
                     
                     # Check overlap with protected ranges (pseudonym)
                     overlaps = any(
@@ -1730,9 +1764,9 @@ async def detect(request: DetectRequest):
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.35
+                    score_threshold=0.5
                 )
-                
+
                 # Filter and format results
                 for result in results:
                     try:
