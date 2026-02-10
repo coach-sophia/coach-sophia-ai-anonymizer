@@ -670,7 +670,7 @@ def create_custom_recognizers():
             score=0.75,
         )
         city_state_zip_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
+            supported_entity="CITY",
             name="CityStateZipRecognizer",
             patterns=[city_state_zip_pattern],
             global_regex_flags=CASE_SENSITIVE_FLAGS,
@@ -685,7 +685,7 @@ def create_custom_recognizers():
             score=0.7,
         )
         street_address_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
+            supported_entity="STREET",
             name="StreetAddressRecognizer",
             patterns=[street_address_pattern],
             global_regex_flags=CASE_SENSITIVE_FLAGS,
@@ -700,7 +700,7 @@ def create_custom_recognizers():
             score=0.6,
         )
         apt_unit_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
+            supported_entity="APT",
             name="AptUnitRecognizer",
             patterns=[apt_unit_pattern],
             global_regex_flags=CASE_SENSITIVE_FLAGS,
