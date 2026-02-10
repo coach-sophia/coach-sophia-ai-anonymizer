@@ -643,22 +643,77 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
 
 def create_custom_recognizers():
     """
-    Create custom recognizers for HIPAA, ISO, and SOC2 compliance.
-    Returns list of custom PatternRecognizer objects.
+    Create custom recognizers for address detection.
     
-    NOTE: All custom recognizers are currently disabled to baseline
-    what standard Presidio (spaCy en_core_web_lg + built-in recognizers)
-    detects on its own. The custom recognizers were causing false positives
-    due to Presidio's default re.IGNORECASE flag on PatternRecognizer.
+    Presidio has NO built-in street address recognizer — its LOCATION
+    detection comes from spaCy NER which only finds named places (cities,
+    countries) not structured addresses. These pattern recognizers fill
+    that gap.
+    
+    IMPORTANT: Presidio's PatternRecognizer defaults to
+    re.DOTALL | re.MULTILINE | re.IGNORECASE.  The address patterns
+    rely on case distinctions (uppercase state abbreviations vs lowercase
+    text) so we explicitly set flags WITHOUT re.IGNORECASE.
     """
-    # --- DISABLED: returning empty list to test vanilla Presidio ---
-    logger.info("Custom recognizers DISABLED — using vanilla Presidio only")
-    return []
-
-    # --- Original custom recognizers below (commented out for reference) ---
-    # from presidio_analyzer import PatternRecognizer, Pattern
-    # custom_recognizers = []
-    # ... (all recognizer definitions removed for clarity) ...
+    from presidio_analyzer import PatternRecognizer, Pattern
+    
+    CASE_SENSITIVE_FLAGS = re.DOTALL | re.MULTILINE  # No re.IGNORECASE
+    
+    custom_recognizers = []
+    
+    try:
+        # City, State ZIP — e.g. "Oakland, CA", "New York, NY 10001"
+        # Requires capitalized city name + uppercase 2-letter state abbreviation
+        city_state_zip_pattern = Pattern(
+            name="city_state_zip",
+            regex=r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s+\d{5}(?:-\d{4})?)?',
+            score=0.75,
+        )
+        city_state_zip_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="CityStateZipRecognizer",
+            patterns=[city_state_zip_pattern],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,
+            context=["address", "live", "lives", "living", "reside", "resides", "located", "from"],
+        )
+        custom_recognizers.append(city_state_zip_recognizer)
+        
+        # Street Address — e.g. "4217 Piedmont Avenue", "123 Oak St"
+        street_address_pattern = Pattern(
+            name="street_address",
+            regex=r'\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|Parkway|Pkwy|Highway|Hwy|Loop)\b',
+            score=0.7,
+        )
+        street_address_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="StreetAddressRecognizer",
+            patterns=[street_address_pattern],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,
+            context=["address", "live", "lives", "living", "reside", "resides", "located", "at"],
+        )
+        custom_recognizers.append(street_address_recognizer)
+        
+        # Apartment / Unit — e.g. "Apt 3B", "Suite 200", "Unit 12A"
+        apt_unit_pattern = Pattern(
+            name="apt_unit",
+            regex=r'\b(?:Apt|Apartment|Unit|Suite|Ste|#)\s*[A-Za-z0-9]+\b',
+            score=0.6,
+        )
+        apt_unit_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="AptUnitRecognizer",
+            patterns=[apt_unit_pattern],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,
+            context=["address", "apartment", "suite", "unit", "floor"],
+        )
+        custom_recognizers.append(apt_unit_recognizer)
+        
+        logger.info(f"Created {len(custom_recognizers)} custom address recognizers (case-sensitive)")
+        
+    except Exception as e:
+        logger.error(f"Error creating custom recognizers: {e}")
+    
+    return custom_recognizers
 
 def get_protected_ranges(text: str, pseudonym: str) -> List[tuple]:
     """Get text ranges to protect (pseudonym occurrences)."""
@@ -1129,7 +1184,7 @@ async def anonymize(request: AnonymizeRequest):
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.5,
+                    score_threshold=0.4,
                     allow_list=allow_list,
                 )
                 
