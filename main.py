@@ -497,6 +497,26 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
             else:
                 logger.info(f"Anonymizing age 89+: '{entity_text_clean}'")
                 return True
+        
+        # Preserve durations/time periods — these are NOT dates directly related
+        # to an individual. e.g., "over six years", "three months", "a few days".
+        duration_match = re.match(
+            r'^(?:over|about|approximately|nearly|almost|around|'
+            r'more\s+than|less\s+than|at\s+least|under|'
+            r'the\s+(?:last|past|next|first|previous)\s+)?\s*'
+            r'(?:a\s+few|a\s+couple\s+(?:of\s+)?|several|many|some|'
+            r'one|two|three|four|five|six|seven|eight|nine|ten|'
+            r'eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|'
+            r'eighteen|nineteen|twenty|thirty|forty|fifty|sixty|'
+            r'seventy|eighty|ninety|hundred|'
+            r'\d+)\s+'
+            r'(?:year|month|week|day|hour|minute|second|decade|centur)'
+            r'(?:ies|y|s)?\b',
+            entity_text_clean, re.IGNORECASE
+        )
+        if duration_match:
+            logger.debug(f"Preserving duration: '{entity_text_clean}'")
+            return False
     
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
     
