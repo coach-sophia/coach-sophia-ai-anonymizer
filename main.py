@@ -635,8 +635,10 @@ def post_process_anonymized_text(text: str) -> str:
     # Clean up markdown link artifacts: [<TAG>](<TAG>) or [<TAG>(<TAG>) → <TAG>
     text = re.sub(r'\[(<[A-Z_]+>)\]?\(\1\)', r'\1', text)
     
-    # Remove orphaned link fragments at end of text (e.g., trailing \n[<URL>(<URL>))
-    text = re.sub(r'(\n\[<[A-Z_]+>\]?\(<[A-Z_]+>\))+\s*$', '', text)
+    # Remove trailing lines that are just standalone entity tags — these are
+    # artifacts from markdown link cleanup or duplicate URL detection, not
+    # meaningful content. (A real URL in a sentence is inline, not on its own line.)
+    text = re.sub(r'(\n<[A-Z_]+>)+\s*$', '', text)
     
     return text
 
