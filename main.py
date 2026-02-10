@@ -1492,13 +1492,15 @@ async def anonymize(request: AnonymizeRequest):
             logger.warning("ML models not available, using regex-only detection")
         
         # STEP 2: Supplementary regex detection (runs ALWAYS, not just on ML failure)
-        regex_entities = supplementary_regex_detection(request.text, request.pseudonym)
-        if regex_entities:
-            logger.info(f"Supplementary regex found {len(regex_entities)} entities")
+        # TODO: Re-enable once regex patterns are tuned (phone parens, state abbrev, ZIP breadth)
+        # regex_entities = supplementary_regex_detection(request.text, request.pseudonym)
+        # if regex_entities:
+        #     logger.info(f"Supplementary regex found {len(regex_entities)} entities")
+        regex_entities = []
         
         # STEP 3: Merge (ML takes priority on overlap)
         all_entities = merge_entities(ml_entities, regex_entities)
-        logger.info(f"Total entities after merge: {len(all_entities)}")
+        logger.info(f"Total entities after merge: {len(all_entities)} (supplementary regex disabled for tuning)")
         
         # STEP 4: Apply replacements using get_replacement()
         anonymized_text, anonymized_spans = apply_replacements(request.text, all_entities)
