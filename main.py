@@ -445,17 +445,10 @@ def get_replacement(entity_type: str, original_text: str = "") -> str:
     return _STATIC_REPLACEMENTS.get(upper, '[redacted]')
 
 # Entity types to EXCLUDE from anonymization
-# These are detected by ML but should NOT be anonymized per user requirement
+# These are detected by ML but should NOT be anonymized
 EXCLUDED_ENTITY_TYPES = {
-    # ===== DATES (Only birth dates should be anonymized) =====
-    'DATE',           # Generic dates (appointment dates, event dates, etc.) - PRESERVE
-    'DATE_TIME',      # Generic date/time - PRESERVE
+    # ===== TIME (time-of-day alone is not HIPAA-relevant) =====
     'TIME',           # Time alone - PRESERVE
-    'DATE_FULL',      # Generic full date format - PRESERVE (if detected)
-    'DATE_ISO',       # Generic ISO date format - PRESERVE (if detected)
-    'ADMISSION_DATE', # Admission dates - PRESERVE
-    'DISCHARGE_DATE', # Discharge dates - PRESERVE
-    'DEATH_DATE',     # Death dates - PRESERVE
     
     # ===== NUMBERS & QUANTITIES (Important context) =====
     'CARDINAL',       # Numbers (spaCy) - PRESERVE (e.g., "5 items", "100 users")
@@ -472,42 +465,6 @@ EXCLUDED_ENTITY_TYPES = {
     'LANGUAGE',       # Languages (spaCy) - PRESERVE (e.g., "English", "Spanish")
     'PRODUCT',        # Products (spaCy) - PRESERVE (e.g., "iPhone", "Windows")
     'FAC',            # Facilities/buildings (spaCy) - PRESERVE (e.g., "Empire State Building")
-    
-    # ===== OVERLY BROAD NUMERIC IDs (High false positive risk) =====
-    # These patterns match common number sequences that are usually NOT national IDs
-    'DUTCH_BSN',      # 9 digits - too broad, matches order numbers
-    'ISRAELI_ID',     # 9 digits - too broad
-    'BAHRAIN_ID',     # 9 digits - too broad
-    'CAMBODIA_ID',    # 9 digits - too broad
-    'CROATIAN_OIB',   # 11 digits - too broad
-    'NIGERIAN_NIN',   # 11 digits - too broad
-    'ESTONIA_ID',     # 11 digits - too broad
-    'LITHUANIA_ID',   # 11 digits - too broad
-    'JAPANESE_MY_NUMBER',  # 12 digits - too broad
-    'KUWAIT_CIVIL_ID',     # 12 digits - too broad
-    'CHINESE_ID_OLD',      # 15 digits - too broad
-    'INDONESIAN_NIK',      # 16 digits - too broad
-    'CHINESE_ID',          # 18 digits - too broad
-    'COLOMBIAN_CEDULA',    # 4-10 digits - way too broad
-    'VIETNAMESE_ID',       # 9-12 digits - too broad
-    'KENYAN_ID',           # 6-10 digits - too broad
-    'ETHIOPIAN_ID',        # 9-12 digits - too broad
-    'MOROCCAN_ID',         # 6-8 digits - too broad
-    'BANGLADESH_NID',      # 10-17 digits - too broad
-    'CZECH_BIRTH_NUMBER',  # 10 digits - too broad
-    'SLOVAK_BIRTH_NUMBER', # 10 digits - too broad
-    'SAUDI_NATIONAL_ID',   # 10 digits - too broad
-    'PORTUGUESE_NIF',      # 9 digits - too broad
-    'SLOVENIAN_EMSO',      # 13 digits - too broad
-    'EGYPTIAN_ID',         # 14 digits - too broad
-}
-
-# Entity types that ARE birth-date related and should be anonymized
-BIRTH_DATE_ENTITY_TYPES = {
-    'DATE_OF_BIRTH',
-    'DOB',
-    'BIRTH_DATE',
-    'BIRTHDAY',
 }
 
 def should_anonymize_entity(entity_type: str, entity_text: str = "", context: str = "") -> bool:
@@ -515,31 +472,16 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     Determine if an entity should be anonymized based on its type and context.
     
     Rules:
-    1. Excluded entity types are NEVER anonymized (dates, numbers, products, etc.)
-    2. Birth date entity types are ALWAYS anonymized
-    3. Generic DATE entities are only anonymized if context suggests birth date
-    4. Numeric-only entities need context validation to avoid false positives
-    5. Common words/phrases that look like PII are filtered out
+    1. Excluded entity types are NEVER anonymized (time, numbers, products, etc.)
+    2. All dates (DATE, DATE_TIME) are anonymized (HIPAA Safe Harbor)
+    3. Numeric-only entities need context validation to avoid false positives
+    4. Common words/phrases that look like PII are filtered out
     """
     entity_upper = entity_type.upper()
     entity_text_clean = entity_text.strip()
     
-    # Always anonymize birth date types
-    if entity_upper in BIRTH_DATE_ENTITY_TYPES:
-        return True
-    
     # Never anonymize excluded types
     if entity_upper in EXCLUDED_ENTITY_TYPES:
-        # Double-check: is this actually a birth date disguised as DATE?
-        birth_keywords = ['birth', 'born', 'dob', 'd.o.b', 'birthday']
-        context_lower = context.lower()
-        entity_lower = entity_text.lower()
-        
-        for keyword in birth_keywords:
-            if keyword in context_lower or keyword in entity_lower:
-                logger.info(f"DATE entity '{entity_text}' has birth context - will anonymize")
-                return True
-        
         return False
     
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
@@ -600,19 +542,16 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
             logger.debug(f"Skipping contraction phrase detected as {entity_upper}: '{entity_text_clean}'")
             return False
     
-    # Filter 3: Skip version numbers (e.g., "1.2.3", "v2.0")
-    import re
+    # Filter 3: Always anonymize IP addresses in clinical context (HIPAA #15)
+    # Must come BEFORE the version-number filter because IPs like "192.168.42.77"
+    # match the version-number regex (digits.digits.digits.digits).
+    if entity_upper == 'IP_ADDRESS':
+        return True
+    
+    # Filter 4: Skip version numbers (e.g., "1.2.3", "v2.0")
     if re.match(r'^v?\d+(\.\d+)+$', entity_text_clean, re.IGNORECASE):
         logger.debug(f"Skipping version number: '{entity_text_clean}'")
         return False
-    
-    # Filter 4: Skip simple numeric sequences without context for URL/IP
-    if entity_upper == 'IP_ADDRESS':
-        # Skip localhost, broadcast, and common internal IPs that are not PII
-        non_pii_ips = ['127.0.0.1', '0.0.0.0', '255.255.255.255', '192.168.0.1', '10.0.0.1']
-        if entity_text_clean in non_pii_ips:
-            logger.debug(f"Skipping common non-PII IP: '{entity_text_clean}'")
-            return False
     
     # Filter 5: Skip entities that are just numbers without proper context
     # (Phone numbers, SSNs etc. have specific formats that are already validated by regex)
@@ -712,6 +651,143 @@ def create_custom_recognizers():
         
     except Exception as e:
         logger.error(f"Error creating custom recognizers: {e}")
+    
+    # ===== HIPAA IDENTIFIER RECOGNIZERS =====
+    # These use keyword prefixes for high precision.
+    # Keyword-prefixed patterns use Presidio's default flags (includes IGNORECASE)
+    # so "MRN-", "mrn-", "Mrn-" all match. Non-keyword patterns that rely on
+    # uppercase use CASE_SENSITIVE_FLAGS explicitly.
+    
+    try:
+        # --- HIPAA #8: Medical Record Number (MRN) ---
+        mrn_recognizer = PatternRecognizer(
+            supported_entity="MRN",
+            name="MrnRecognizer",
+            patterns=[Pattern(name="mrn", regex=r'\bMRN[-#:\s]*[A-Z0-9-]{6,12}\b', score=0.95)],
+            # Default flags (IGNORECASE) — keyword "MRN" may appear in any case
+        )
+        custom_recognizers.append(mrn_recognizer)
+        
+        # --- HIPAA #9: Health Plan Beneficiary Number ---
+        health_plan_recognizer = PatternRecognizer(
+            supported_entity="HEALTH_PLAN",
+            name="HealthPlanRecognizer",
+            patterns=[Pattern(name="health_plan", regex=r'\b(?:HMO|PPO|EPO|POS|HSA)[-]?[A-Z]{0,3}[-]?\d{6,12}\b', score=0.9)],
+            # Default flags (IGNORECASE)
+        )
+        custom_recognizers.append(health_plan_recognizer)
+        
+        # --- HIPAA #10: Account Number ---
+        account_recognizer = PatternRecognizer(
+            supported_entity="ACCOUNT_NUMBER",
+            name="AccountNumberRecognizer",
+            patterns=[Pattern(name="account", regex=r'\bACCT[-#:\s]*[A-Z0-9-]{6,12}\b', score=0.95)],
+            # Default flags (IGNORECASE)
+        )
+        custom_recognizers.append(account_recognizer)
+        
+        # --- HIPAA #7: SSN (space-separated) ---
+        # Presidio's built-in UsSsnRecognizer only matches hyphen-separated (XXX-XX-XXXX).
+        # This adds space-separated support. The 3-2-4 digit grouping is distinctive
+        # (phone numbers are 3-3-4), so false positives are unlikely.
+        ssn_recognizer = PatternRecognizer(
+            supported_entity="SSN",
+            name="SsnSpaceSeparatedRecognizer",
+            patterns=[Pattern(name="ssn_spaces", regex=r'\b\d{3}[-\s]\d{2}[-\s]\d{4}\b', score=0.85)],
+            context=["ssn", "social", "security"],
+        )
+        custom_recognizers.append(ssn_recognizer)
+        
+        # --- HIPAA #11a: Certificate / Driver License Number ---
+        # Keyword-prefixed with "CERT" or "DL"
+        certificate_recognizer = PatternRecognizer(
+            supported_entity="CERTIFICATE",
+            name="CertificateRecognizer",
+            patterns=[Pattern(name="certificate", regex=r'\b(?:CERT|DL)[-]?(?:ID[-]?)?[A-Z]{0,3}[-]?\d{4,10}\b', score=0.9)],
+            # Default flags (IGNORECASE)
+        )
+        custom_recognizers.append(certificate_recognizer)
+        
+        # --- HIPAA #11b: Professional License Number ---
+        # For codes like "CA-PMP-556091" (state-prefix-number).
+        # Middle segment requires 3+ letters to avoid overlap with CERTIFICATE's
+        # "DL-CA-..." patterns (where "CA" is only 2 letters).
+        # Score 0.8 < CERTIFICATE's 0.9 so CERTIFICATE wins overlap resolution.
+        license_recognizer = PatternRecognizer(
+            supported_entity="LICENSE",
+            name="LicenseRecognizer",
+            patterns=[Pattern(name="license", regex=r'\b[A-Z]{2}-[A-Z]{3,}-\d{4,10}\b', score=0.8)],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,  # Uppercase-only patterns
+        )
+        custom_recognizers.append(license_recognizer)
+        
+        # --- HIPAA #12: License Plate ---
+        # Context words prevent false positives on generic "XX-XXXXXXXX" patterns.
+        license_plate_recognizer = PatternRecognizer(
+            supported_entity="LICENSE_PLATE",
+            name="LicensePlateRecognizer",
+            patterns=[Pattern(name="license_plate", regex=r'\b[A-Z]{2}-[A-Z0-9]{4,8}\b', score=0.7)],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,
+            context=["plate", "license plate", "vehicle", "registered", "car", "truck"],
+        )
+        custom_recognizers.append(license_plate_recognizer)
+        
+        # --- HIPAA #13: Device Identifier ---
+        device_recognizer = PatternRecognizer(
+            supported_entity="DEVICE_ID",
+            name="DeviceIdRecognizer",
+            patterns=[Pattern(name="device_id", regex=r'\bDEV[-][A-Z0-9-]{6,20}\b', score=0.9)],
+            # Default flags (IGNORECASE)
+        )
+        custom_recognizers.append(device_recognizer)
+        
+        # --- HIPAA #2: ZIP Code ---
+        # Two patterns: (1) "StateName ZIP" for high confidence, (2) bare 5-digit with context.
+        zip_state_name_pattern = Pattern(
+            name="state_name_zip",
+            regex=(
+                r'(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|'
+                r'Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|'
+                r'Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|'
+                r'Mississippi|Missouri|Montana|Nebraska|Nevada|New\sHampshire|'
+                r'New\sJersey|New\sMexico|New\sYork|North\sCarolina|North\sDakota|'
+                r'Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\sIsland|South\sCarolina|'
+                r'South\sDakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|'
+                r'West\sVirginia|Wisconsin|Wyoming)\s+\d{5}(?:-\d{4})?'
+            ),
+            score=0.85,
+        )
+        zip_bare_pattern = Pattern(
+            name="zip_bare",
+            regex=r'\b\d{5}(?:-\d{4})?\b',
+            score=0.01,  # Very low — needs context enhancement to pass threshold
+        )
+        zip_recognizer = PatternRecognizer(
+            supported_entity="ZIP_CODE",
+            name="ZipCodeRecognizer",
+            patterns=[zip_state_name_pattern, zip_bare_pattern],
+            global_regex_flags=CASE_SENSITIVE_FLAGS,  # State names are capitalized
+            context=["zip", "postal", "address", "county", "state",
+                     "california", "oakland", "resides", "residing"],
+        )
+        custom_recognizers.append(zip_recognizer)
+        
+        # --- HIPAA #18: Unique Identifying Number (catch-all) ---
+        # Only strong keyword prefixes: CLIENT, UID. Short/generic prefixes
+        # like "BL" or "REF" are intentionally excluded to avoid false positives.
+        unique_id_recognizer = PatternRecognizer(
+            supported_entity="UNIQUE_ID",
+            name="UniqueIdRecognizer",
+            patterns=[Pattern(name="unique_id", regex=r'\b(?:CLIENT|UID)[-][A-Z0-9-]{4,20}\b', score=0.85)],
+            context=["identifier", "code", "reference", "tracking", "assigned", "internal"],
+            # Default flags (IGNORECASE)
+        )
+        custom_recognizers.append(unique_id_recognizer)
+        
+        logger.info(f"Total custom recognizers: {len(custom_recognizers)} (address + HIPAA identifiers)")
+        
+    except Exception as e:
+        logger.error(f"Error creating HIPAA recognizers: {e}")
     
     return custom_recognizers
 
@@ -1273,7 +1349,7 @@ async def detect(request: DetectRequest):
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.5
+                    score_threshold=0.4
                 )
 
                 # Filter and format results
