@@ -473,9 +473,10 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     
     Rules:
     1. Excluded entity types are NEVER anonymized (time, numbers, products, etc.)
-    2. All dates (DATE, DATE_TIME) are anonymized (HIPAA Safe Harbor)
-    3. Numeric-only entities need context validation to avoid false positives
-    4. Common words/phrases that look like PII are filtered out
+    2. Dates are anonymized but year is preserved (HIPAA Safe Harbor #3)
+    3. Ages under 89 are preserved; ages 89+ are anonymized (HIPAA Safe Harbor)
+    4. Numeric-only entities need context validation to avoid false positives
+    5. Common words/phrases that look like PII are filtered out
     """
     entity_upper = entity_type.upper()
     entity_text_clean = entity_text.strip()
@@ -483,6 +484,19 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     # Never anonymize excluded types
     if entity_upper in EXCLUDED_ENTITY_TYPES:
         return False
+    
+    # HIPAA Safe Harbor: preserve ages under 89 (only 89+ must be anonymized)
+    # spaCy detects "38-year-old" as DATE_TIME, so we catch age patterns here.
+    if entity_upper in ('DATE_TIME', 'DATE'):
+        age_match = re.match(r'^(\d+)[-\s]*year', entity_text_clean, re.IGNORECASE)
+        if age_match:
+            age = int(age_match.group(1))
+            if age < 89:
+                logger.debug(f"Preserving age under 89: '{entity_text_clean}'")
+                return False
+            else:
+                logger.info(f"Anonymizing age 89+: '{entity_text_clean}'")
+                return True
     
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
     
@@ -578,6 +592,53 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     
     # All other entity types - anonymize
     return True
+
+
+def hipaa_date_operator(entity_text: str) -> str:
+    """
+    HIPAA Safe Harbor date replacement: keep year, redact month/day.
+    
+    Per HIPAA §164.514(b)(2)(i)(C): "All elements of dates (except year)
+    directly related to an individual" must be removed. Ages over 89 must
+    be aggregated to "90 or older".
+    
+    Used as a Presidio custom operator for DATE_TIME / DATE entities.
+    """
+    # Ages 89+ → "90 or older" (ages < 89 are already filtered in should_anonymize_entity)
+    age_match = re.match(r'^(\d+)[-\s]*year', entity_text, re.IGNORECASE)
+    if age_match and int(age_match.group(1)) >= 89:
+        return '90 or older'
+    
+    # Extract year from date (19xx or 20xx)
+    year_match = re.search(r'\b((?:19|20)\d{2})\b', entity_text)
+    if year_match:
+        return year_match.group(1)
+    
+    # No year found (e.g., "March 14th", "last Tuesday") → full redaction
+    return '<DATE_TIME>'
+
+
+def post_process_anonymized_text(text: str) -> str:
+    """
+    Clean up anonymized text artifacts.
+    
+    1. Merge adjacent <ORGANIZATION> <PERSON> into <PERSON> — spaCy sometimes
+       splits a full name like "Franklin Michael Alvarez" into ORG + PERSON.
+       Both are redacted, but the label is misleading.
+    2. Clean up markdown link artifacts where URLs inside [text](url) markup
+       both get replaced with <URL>, producing fragments like [<URL>(<URL>).
+    """
+    # Merge adjacent ORG + PERSON tags (common spaCy NER misclassification
+    # where a first name like "Franklin" is detected as ORGANIZATION)
+    text = re.sub(r'<ORGANIZATION>\s+<PERSON>', '<PERSON>', text)
+    
+    # Clean up markdown link artifacts: [<TAG>](<TAG>) or [<TAG>(<TAG>) → <TAG>
+    text = re.sub(r'\[(<[A-Z_]+>)\]?\(\1\)', r'\1', text)
+    
+    # Remove orphaned link fragments at end of text (e.g., trailing \n[<URL>(<URL>))
+    text = re.sub(r'(\n\[<[A-Z_]+>\]?\(<[A-Z_]+>\))+\s*$', '', text)
+    
+    return text
 
 
 def create_custom_recognizers():
@@ -722,11 +783,13 @@ def create_custom_recognizers():
         custom_recognizers.append(license_recognizer)
         
         # --- HIPAA #12: License Plate ---
-        # Context words prevent false positives on generic "XX-XXXXXXXX" patterns.
+        # Base score 0.3 is BELOW the 0.4 threshold, so this recognizer only fires
+        # when Presidio's context enhancer finds nearby context words (~+0.35 boost).
+        # This prevents false positives on generic "XX-XXXXX" patterns like "PM-11872".
         license_plate_recognizer = PatternRecognizer(
             supported_entity="LICENSE_PLATE",
             name="LicensePlateRecognizer",
-            patterns=[Pattern(name="license_plate", regex=r'\b[A-Z]{2}-[A-Z0-9]{4,8}\b', score=0.7)],
+            patterns=[Pattern(name="license_plate", regex=r'\b[A-Z]{2}-[A-Z0-9]{4,8}\b', score=0.3)],
             global_regex_flags=CASE_SENSITIVE_FLAGS,
             context=["plate", "license plate", "vehicle", "registered", "car", "truck"],
         )
@@ -1283,10 +1346,20 @@ async def anonymize(request: AnonymizeRequest):
                 logger.info(f"Presidio detected {len(results)} entities, {len(filtered_results)} after filtering")
                 
                 # STEP 3: Anonymize with standard Presidio AnonymizerEngine
+                # Use custom operator for dates: keep year, redact month/day (HIPAA Safe Harbor)
+                operators = {
+                    "DATE_TIME": OperatorConfig("custom", {"lambda": hipaa_date_operator}),
+                    "DATE": OperatorConfig("custom", {"lambda": hipaa_date_operator}),
+                }
+                
                 anonymizer_result = anonymizer.anonymize(
                     text=request.text,
                     analyzer_results=filtered_results,
+                    operators=operators,
                 )
+                
+                # STEP 4: Post-process to clean up artifacts
+                anonymized_text = post_process_anonymized_text(anonymizer_result.text)
                 
                 # Build spans list from Presidio's result items
                 anonymized_spans = []
@@ -1303,7 +1376,7 @@ async def anonymize(request: AnonymizeRequest):
                 anonymized_spans.reverse()
                 
                 return AnonymizeResponse(
-                    anonymized_text=anonymizer_result.text,
+                    anonymized_text=anonymized_text,
                     anonymized_spans=anonymized_spans,
                     pseudonym_preserved=request.pseudonym
                 )
