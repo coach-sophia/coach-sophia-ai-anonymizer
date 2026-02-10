@@ -62,7 +62,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Tuple
 import os
-from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer import AnalyzerEngine, RecognizerResult
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
@@ -618,6 +618,19 @@ def hipaa_date_operator(entity_text: str) -> str:
     return '<DATE_TIME>'
 
 
+def person_initial_operator(entity_text: str) -> str:
+    """
+    Replace person names with first initial only.
+    
+    HIPAA Safe Harbor requires removal of names. A single initial is not
+    a name and is standard practice in clinical de-identification.
+    """
+    first_char = entity_text.strip()[:1].upper()
+    if first_char.isalpha():
+        return first_char
+    return '<PERSON>'
+
+
 def post_process_anonymized_text(text: str) -> str:
     """
     Clean up anonymized text artifacts.
@@ -628,10 +641,6 @@ def post_process_anonymized_text(text: str) -> str:
     2. Clean up markdown link artifacts where URLs inside [text](url) markup
        both get replaced with <URL>, producing fragments like [<URL>(<URL>).
     """
-    # Merge adjacent ORG + PERSON tags (common spaCy NER misclassification
-    # where a first name like "Franklin" is detected as ORGANIZATION)
-    text = re.sub(r'<ORGANIZATION>\s+<PERSON>', '<PERSON>', text)
-    
     # Clean up markdown link artifacts: [<TAG>](<TAG>) or [<TAG>(<TAG>) → <TAG>
     text = re.sub(r'\[(<[A-Z_]+>)\]?\(\1\)', r'\1', text)
     
@@ -1347,16 +1356,46 @@ async def anonymize(request: AnonymizeRequest):
                 
                 logger.info(f"Presidio detected {len(results)} entities, {len(filtered_results)} after filtering")
                 
-                # STEP 3: Anonymize with standard Presidio AnonymizerEngine
-                # Use custom operator for dates: keep year, redact month/day (HIPAA Safe Harbor)
+                # STEP 3: Merge adjacent ORGANIZATION + PERSON entities into PERSON.
+                # spaCy sometimes splits "Franklin Michael Alvarez" into
+                # ORG("Franklin") + PERSON("Michael Alvarez Jr."). Merging before
+                # anonymization ensures the PERSON operator gets the full name and
+                # extracts the correct first initial.
+                filtered_results.sort(key=lambda r: r.start)
+                merged_results = []
+                skip_next = False
+                for i, result in enumerate(filtered_results):
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if (result.entity_type == 'ORGANIZATION' and
+                            i + 1 < len(filtered_results) and
+                            filtered_results[i + 1].entity_type == 'PERSON'):
+                        gap = request.text[result.end:filtered_results[i + 1].start]
+                        if gap.strip() == '' and len(gap) <= 3:
+                            merged = RecognizerResult(
+                                entity_type="PERSON",
+                                start=result.start,
+                                end=filtered_results[i + 1].end,
+                                score=max(result.score, filtered_results[i + 1].score),
+                            )
+                            logger.info(f"  MERGE: ORG+PERSON → PERSON '{request.text[merged.start:merged.end]}'")
+                            merged_results.append(merged)
+                            skip_next = True
+                            continue
+                    merged_results.append(result)
+                
+                # STEP 4: Anonymize with standard Presidio AnonymizerEngine
+                # Custom operators: dates keep year only, names become first initial
                 operators = {
                     "DATE_TIME": OperatorConfig("custom", {"lambda": hipaa_date_operator}),
                     "DATE": OperatorConfig("custom", {"lambda": hipaa_date_operator}),
+                    "PERSON": OperatorConfig("custom", {"lambda": person_initial_operator}),
                 }
                 
                 anonymizer_result = anonymizer.anonymize(
                     text=request.text,
-                    analyzer_results=filtered_results,
+                    analyzer_results=merged_results,
                     operators=operators,
                 )
                 
