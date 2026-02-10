@@ -65,7 +65,7 @@ import os
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
-# OperatorConfig and RecognizerResult no longer needed - using custom apply_replacements()
+from presidio_anonymizer.entities import OperatorConfig
 import re
 import logging
 from functools import wraps
@@ -645,512 +645,20 @@ def create_custom_recognizers():
     """
     Create custom recognizers for HIPAA, ISO, and SOC2 compliance.
     Returns list of custom PatternRecognizer objects.
+    
+    NOTE: All custom recognizers are currently disabled to baseline
+    what standard Presidio (spaCy en_core_web_lg + built-in recognizers)
+    detects on its own. The custom recognizers were causing false positives
+    due to Presidio's default re.IGNORECASE flag on PatternRecognizer.
     """
-    from presidio_analyzer import PatternRecognizer, Pattern
-    
-    custom_recognizers = []
-    
-    try:
-        # Date of Birth Recognizer - ONLY matches dates with explicit birth context
-        # Generic dates are NOT anonymized per user requirement
-        dob_patterns = [
-            # Explicit DOB keyword followed by date
-            Pattern(name="dob_keyword", regex=r'\b(?:dob|d\.o\.b\.?)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
-            # "date of birth" phrase followed by date
-            Pattern(name="date_of_birth", regex=r'\bdate\s+of\s+birth[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
-            # "birth date" or "birthday" followed by date
-            Pattern(name="birth_date", regex=r'\bbirth\s*(?:date|day)[\s:]*(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.95),
-            # "born on" or "born" followed by date
-            Pattern(name="born_on", regex=r'\bborn\s+(?:on\s+)?(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})', score=0.9),
-            # Date followed by "is my birthday" or similar
-            Pattern(name="my_birthday", regex=r'(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})\s+(?:is\s+)?(?:my\s+)?(?:birth\s*day|birthday)', score=0.9),
-        ]
-        dob_recognizer = PatternRecognizer(
-            supported_entity="DATE_OF_BIRTH",
-            patterns=dob_patterns,
-            context=["born", "dob", "birth", "birthday", "date of birth", "d.o.b"]
-        )
-        custom_recognizers.append(dob_recognizer)
-        
-        # Age Over 89 Recognizer (HIPAA requires special protection)
-        age_89_pattern = Pattern(
-            name="age_over_89",
-            regex=r'\b(?:age|aged)[\s:]*(?:8[9]|9\d|1\d{2})\s*(?:years?|yrs?|y\.?o\.?)?',
-            score=0.95
-        )
-        age_89_recognizer = PatternRecognizer(
-            supported_entity="AGE_OVER_89",
-            patterns=[age_89_pattern],
-            context=["age", "aged", "years old", "y/o", "y.o."]
-        )
-        custom_recognizers.append(age_89_recognizer)
-        
-        # Medical Record Number (HIPAA PHI)
-        mrn_patterns = [
-            Pattern(name="mrn_explicit", regex=r'\b(?:MRN|medical\s+record|patient\s+id|mrn\s*#)[\s#:\-]*[A-Z0-9\-]{6,12}\b', score=0.9),
-            Pattern(name="mrn_pattern", regex=r'\bMRN[\s#:\-]*\d{6,10}\b', score=0.95),
-            Pattern(name="mrn_full_text", regex=r'\bmedical\s+record\s+number[\s#:\-]*[A-Z0-9\-]{6,12}\b', score=0.95),
-        ]
-        mrn_recognizer = PatternRecognizer(
-            supported_entity="MEDICAL_RECORD_NUMBER",
-            patterns=mrn_patterns,
-            context=["medical record", "medical record number", "MRN", "patient id", "patient number", "patient record"]
-        )
-        custom_recognizers.append(mrn_recognizer)
-        
-        # Health Plan/Insurance Number (HIPAA PHI)
-        health_plan_pattern = Pattern(
-            name="health_plan",
-            regex=r'\b(?:health plan|insurance|policy|member)[\s#:]*[A-Z0-9]{6,20}\b',
-            score=0.85
-        )
-        health_plan_recognizer = PatternRecognizer(
-            supported_entity="HEALTH_PLAN_NUMBER",
-            patterns=[health_plan_pattern],
-            context=["insurance", "health plan", "policy", "member id", "subscriber"]
-        )
-        custom_recognizers.append(health_plan_recognizer)
-        
-        # Gender Recognizer (sensitive personal data)
-        gender_pattern = Pattern(
-            name="gender",
-            regex=r'\b(?:gender|sex)[\s:]*(?:male|female|non-binary|transgender|intersex|other|M|F|X)\b',
-            score=0.8
-        )
-        gender_recognizer = PatternRecognizer(
-            supported_entity="GENDER",
-            patterns=[gender_pattern],
-            context=["gender", "sex", "identify as"]
-        )
-        custom_recognizers.append(gender_recognizer)
-        
-        # Device/Serial Number (HIPAA)
-        device_pattern = Pattern(
-            name="device_id",
-            regex=r'\b(?:device|serial|IMEI|MEID)[\s#:]*[A-Z0-9]{8,20}\b',
-            score=0.85
-        )
-        device_recognizer = PatternRecognizer(
-            supported_entity="DEVICE_ID",
-            patterns=[device_pattern],
-            context=["device", "serial", "IMEI", "equipment"]
-        )
-        custom_recognizers.append(device_recognizer)
-        
-        # VIN (Vehicle Identification Number - HIPAA)
-        vin_pattern = Pattern(
-            name="vin",
-            regex=r'\b[A-HJ-NPR-Z0-9]{17}\b',
-            score=0.9
-        )
-        vin_recognizer = PatternRecognizer(
-            supported_entity="VIN",
-            patterns=[vin_pattern],
-            context=["VIN", "vehicle", "car", "automobile"]
-        )
-        custom_recognizers.append(vin_recognizer)
-        
-        # API Keys and Credentials (SOC 2)
-        api_key_pattern = Pattern(
-            name="api_key",
-            regex=r'\b(?:api[_-]?key|apikey|access[_-]?token|secret[_-]?key)[\s:=]*[\'"]?[A-Za-z0-9_\-]{20,}\b',
-            score=0.9
-        )
-        api_key_recognizer = PatternRecognizer(
-            supported_entity="API_KEY",
-            patterns=[api_key_pattern],
-            context=["api", "key", "token", "secret", "credential"]
-        )
-        custom_recognizers.append(api_key_recognizer)
-        
-        # Account Numbers (SOC 2, financial data)
-        account_pattern = Pattern(
-            name="account_number",
-            regex=r'\b(?:account|acct|acc)[\s#:]*\d{6,17}\b',
-            score=0.85
-        )
-        account_recognizer = PatternRecognizer(
-            supported_entity="ACCOUNT_NUMBER",
-            patterns=[account_pattern],
-            context=["account", "acct", "bank", "financial"]
-        )
-        custom_recognizers.append(account_recognizer)
-        
-        # Aadhaar Number (Indian unique identifier - HIPAA "Any other unique number")
-        aadhaar_pattern = Pattern(
-            name="aadhaar",
-            regex=r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b',
-            score=0.95
-        )
-        aadhaar_recognizer = PatternRecognizer(
-            supported_entity="AADHAAR_NUMBER",
-            patterns=[aadhaar_pattern],
-            context=["aadhaar", "aadhaar number", "uid"]
-        )
-        custom_recognizers.append(aadhaar_recognizer)
-        
-        # PAN Number (Permanent Account Number - Indian tax identifier - HIPAA "Any other unique number")
-        pan_pattern = Pattern(
-            name="pan",
-            regex=r'\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b',
-            score=0.95
-        )
-        pan_recognizer = PatternRecognizer(
-            supported_entity="PAN_NUMBER",
-            patterns=[pan_pattern],
-            context=["PAN", "pan", "pan number", "permanent account", "tax identifier", "tax number"]
-        )
-        custom_recognizers.append(pan_recognizer)
-        
-        # Indian Passport (HIPAA passport number + ISO 27001 identifier)
-        passport_pattern = Pattern(
-            name="indian_passport",
-            regex=r'\b[A-Z]{1}[0-9]{7}\b',
-            score=0.9
-        )
-        passport_recognizer = PatternRecognizer(
-            supported_entity="INDIAN_PASSPORT",
-            patterns=[passport_pattern],
-            context=["passport", "passport number"]
-        )
-        custom_recognizers.append(passport_recognizer)
-        
-        # Username (SOC 2, ISO 27001 - access control and online identifiers)
-        username_pattern = Pattern(
-            name="username",
-            regex=r'\b(?:username|user|handle|login|uid)[\s:]*([A-Za-z0-9_\.]{4,32})\b',
-            score=0.85
-        )
-        username_recognizer = PatternRecognizer(
-            supported_entity="USERNAME",
-            patterns=[username_pattern],
-            context=["username", "user", "handle", "login", "@"]
-        )
-        custom_recognizers.append(username_recognizer)
-        
-        # Company/Organization Name (ISO 27001 - related entity identification)
-        # IMPORTANT: Removed "Tech", "Technologies" - too common and causes false positives
-        # Only match when followed by legal suffixes like Ltd, Inc, Corp, LLC
-        company_patterns = [
-            # Must end with legal entity suffix
-            Pattern(name="company_ltd", regex=r'\b([A-Z][A-Za-z\s&.,\'-]{2,40}\s+(?:Ltd\.?|Limited))\b', score=0.9),
-            Pattern(name="company_inc", regex=r'\b([A-Z][A-Za-z\s&.,\'-]{2,40}\s+(?:Inc\.?|Incorporated))\b', score=0.9),
-            Pattern(name="company_corp", regex=r'\b([A-Z][A-Za-z\s&.,\'-]{2,40}\s+(?:Corp\.?|Corporation))\b', score=0.9),
-            Pattern(name="company_llc", regex=r'\b([A-Z][A-Za-z\s&.,\'-]{2,40}\s+(?:LLC|LLP|L\.L\.C\.))\b', score=0.9),
-            Pattern(name="company_pvt_ltd", regex=r'\b([A-Z][A-Za-z\s&.,\'-]{2,40}\s+(?:Pvt\.?\s+Ltd\.?|Private\s+Limited))\b', score=0.95),
-        ]
-        company_recognizer = PatternRecognizer(
-            supported_entity="COMPANY_NAME",
-            patterns=company_patterns,
-            context=["company", "organization", "corporation", "employer", "works at", "employed by"]
-        )
-        custom_recognizers.append(company_recognizer)
-        
-        # Vehicle Registration Number (HIPAA vehicle identifiers, Indian format)
-        registration_pattern = Pattern(
-            name="vehicle_registration",
-            regex=r'\b[A-Z]{2}[-\s]?\d{2}[-\s][A-Z]{2}[-\s]\d{4}\b',  # GJ-01-AB-7788
-            score=0.9
-        )
-        registration_recognizer = PatternRecognizer(
-            supported_entity="VEHICLE_REGISTRATION",
-            patterns=[registration_pattern],
-            context=["registration", "vehicle", "car", "number plate"]
-        )
-        custom_recognizers.append(registration_recognizer)
-        
-        # Insurance/Policy Number (HIPAA health plan, ISO 27001)
-        policy_patterns = [
-            Pattern(name="policy_explicit", regex=r'\b(?:policy|plan)[\s#:]*(?:number|no)?[\s#:]*([A-Z]{2,3}[-]?(?:IND[-]?)?\d{6,10})\b', score=0.9),
-            Pattern(name="policy_code", regex=r'\b(?:HS|HP|AP)[-](?:IND[-])?\d{6,10}\b', score=0.85),
-        ]
-        policy_recognizer = PatternRecognizer(
-            supported_entity="INSURANCE_POLICY_NUMBER",
-            patterns=policy_patterns,
-            context=["policy", "plan", "insurance", "health"]
-        )
-        custom_recognizers.append(policy_recognizer)
-        
-        # School/Institution Name (ISO 27001 - related entity identification)
-        institution_pattern = Pattern(
-            name="institution",
-            regex=r'\b(?:school|college|university|institute|academy)[\s:]*([A-Z][A-Za-z\s&.,\'-]{3,50})\b',
-            score=0.8
-        )
-        institution_recognizer = PatternRecognizer(
-            supported_entity="INSTITUTION_NAME",
-            patterns=[institution_pattern],
-            context=["school", "college", "university", "institute", "academy"]
-        )
-        custom_recognizers.append(institution_recognizer)
-        
-        # ========== ADDRESS / LOCATION PATTERN RECOGNIZERS ==========
-        # These run alongside spaCy NER and benefit from Presidio's context
-        # enhancement and overlap resolution. They detect structured address
-        # components that ML NER often misses (ZIP codes, formatted addresses).
-        
-        # City, State ZIP — very specific pattern, high base score
-        # Matches: "Oakland, CA", "New York, NY 10001", "San Francisco, CA 94107-1234"
-        city_state_zip_pattern = Pattern(
-            name="city_state_zip",
-            regex=r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s+\d{5}(?:-\d{4})?)?',
-            score=0.75
-        )
-        city_state_zip_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
-            name="CityStateZipRecognizer",
-            patterns=[city_state_zip_pattern],
-            context=["address", "live", "lives", "living", "reside", "resides", "located", "from"]
-        )
-        custom_recognizers.append(city_state_zip_recognizer)
-        
-        # Street Address — matches common US street address formats
-        # Matches: "123 Oak Street", "4500 El Camino Real", "1 Main St"
-        street_address_pattern = Pattern(
-            name="street_address",
-            regex=r'\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|Parkway|Pkwy|Highway|Hwy|Loop)\b',
-            score=0.7
-        )
-        street_address_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
-            name="StreetAddressRecognizer",
-            patterns=[street_address_pattern],
-            context=["address", "live", "lives", "living", "reside", "resides", "located", "at"]
-        )
-        custom_recognizers.append(street_address_recognizer)
-        
-        # ZIP Code — weak pattern (any 5 digits), needs context to score well
-        zip_code_pattern = Pattern(
-            name="zip_code",
-            regex=r'\b\d{5}(?:-\d{4})?\b',
-            score=0.1  # Very low base — boosted by context enhancement
-        )
-        zip_code_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
-            name="ZipCodeRecognizer",
-            patterns=[zip_code_pattern],
-            context=["zip", "zipcode", "zip code", "postal", "postal code", "address"]
-        )
-        custom_recognizers.append(zip_code_recognizer)
-        
-        # Apartment / Unit — matches "Apt 5B", "Suite 200", "Unit 12A"
-        apt_unit_pattern = Pattern(
-            name="apt_unit",
-            regex=r'\b(?:Apt|Apartment|Unit|Suite|Ste|#)\s*[A-Za-z0-9]+\b',
-            score=0.6
-        )
-        apt_unit_recognizer = PatternRecognizer(
-            supported_entity="LOCATION",
-            name="AptUnitRecognizer",
-            patterns=[apt_unit_pattern],
-            context=["address", "apartment", "suite", "unit", "floor"]
-        )
-        custom_recognizers.append(apt_unit_recognizer)
-        
-        # ========== INTERNATIONAL IDENTITY CARD RECOGNIZERS ==========
-        
-        # UK NINO (National Insurance Number)
-        uk_nino_pattern = Pattern(
-            name="uk_nino",
-            regex=r'\b[A-Z]{2}\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-Z]\b',
-            score=0.95
-        )
-        uk_nino_recognizer = PatternRecognizer(
-            supported_entity="UK_NINO",
-            patterns=[uk_nino_pattern],
-            context=["NINO", "national insurance", "insurance number"]
-        )
-        custom_recognizers.append(uk_nino_recognizer)
-        
-        # Canadian SIN (Social Insurance Number)
-        canadian_sin_pattern = Pattern(
-            name="canadian_sin",
-            regex=r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',
-            score=0.85
-        )
-        canadian_sin_recognizer = PatternRecognizer(
-            supported_entity="CANADIAN_SIN",
-            patterns=[canadian_sin_pattern],
-            context=["SIN", "social insurance", "canada"]
-        )
-        custom_recognizers.append(canadian_sin_recognizer)
-        
-        # Brazilian CPF
-        brazilian_cpf_pattern = Pattern(
-            name="brazilian_cpf",
-            regex=r'\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b',
-            score=0.95
-        )
-        brazilian_cpf_recognizer = PatternRecognizer(
-            supported_entity="BRAZILIAN_CPF",
-            patterns=[brazilian_cpf_pattern],
-            context=["CPF", "cadastro", "brasil", "brazil"]
-        )
-        custom_recognizers.append(brazilian_cpf_recognizer)
-        
-        # Chinese ID (18 digits - very specific)
-        chinese_id_pattern = Pattern(
-            name="chinese_id",
-            regex=r'\b\d{18}\b',
-            score=0.9
-        )
-        chinese_id_recognizer = PatternRecognizer(
-            supported_entity="CHINESE_ID",
-            patterns=[chinese_id_pattern],
-            context=["ID", "身份证", "China", "chinese"]
-        )
-        custom_recognizers.append(chinese_id_recognizer)
-        
-        # German Steuernummer (Tax ID)
-        german_steuernummer_pattern = Pattern(
-            name="german_steuernummer",
-            regex=r'\b\d{2}[-\s]?\d{2,3}[-\s]?\d{3,4}[-\s]?\d{1}\b',
-            score=0.85
-        )
-        german_steuernummer_recognizer = PatternRecognizer(
-            supported_entity="GERMAN_STEUERNUMMER",
-            patterns=[german_steuernummer_pattern],
-            context=["Steuernummer", "tax", "germany", "deutsch"]
-        )
-        custom_recognizers.append(german_steuernummer_recognizer)
-        
-        # Spanish DNI
-        spanish_dni_pattern = Pattern(
-            name="spanish_dni",
-            regex=r'\b\d{8}-?[A-Z]\b',
-            score=0.95
-        )
-        spanish_dni_recognizer = PatternRecognizer(
-            supported_entity="SPANISH_DNI",
-            patterns=[spanish_dni_pattern],
-            context=["DNI", "españa", "spain"]
-        )
-        custom_recognizers.append(spanish_dni_recognizer)
-        
-        # French INSEE
-        french_insee_pattern = Pattern(
-            name="french_insee",
-            regex=r'\b\d{1}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{2}[-\s]?\d{3}[-\s]?\d{3}\b',
-            score=0.9
-        )
-        french_insee_recognizer = PatternRecognizer(
-            supported_entity="FRENCH_INSEE",
-            patterns=[french_insee_pattern],
-            context=["INSEE", "numéro", "france", "français"]
-        )
-        custom_recognizers.append(french_insee_recognizer)
-        
-        # Italian Codice Fiscale
-        italian_cf_pattern = Pattern(
-            name="italian_cf",
-            regex=r'\b[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]\b',
-            score=0.95
-        )
-        italian_cf_recognizer = PatternRecognizer(
-            supported_entity="ITALIAN_CF",
-            patterns=[italian_cf_pattern],
-            context=["Codice Fiscale", "CF", "italy", "italiano"]
-        )
-        custom_recognizers.append(italian_cf_recognizer)
-        
-        # Polish PESEL
-        polish_pesel_pattern = Pattern(
-            name="polish_pesel",
-            regex=r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}\d{3}[0-9]\b',
-            score=0.95
-        )
-        polish_pesel_recognizer = PatternRecognizer(
-            supported_entity="POLISH_PESEL",
-            patterns=[polish_pesel_pattern],
-            context=["PESEL", "poland", "polski"]
-        )
-        custom_recognizers.append(polish_pesel_recognizer)
-        
-        # Australian TFN (Tax File Number)
-        australian_tfn_pattern = Pattern(
-            name="australian_tfn",
-            regex=r'\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b',
-            score=0.85
-        )
-        australian_tfn_recognizer = PatternRecognizer(
-            supported_entity="AUSTRALIAN_TFN",
-            patterns=[australian_tfn_pattern],
-            context=["TFN", "tax file", "australia"]
-        )
-        custom_recognizers.append(australian_tfn_recognizer)
-        
-        # South Korean RRN (Resident Registration Number)
-        south_korean_rrn_pattern = Pattern(
-            name="south_korean_rrn",
-            regex=r'\b\d{6}[-]?\d{7}\b',
-            score=0.9
-        )
-        south_korean_rrn_recognizer = PatternRecognizer(
-            supported_entity="SOUTH_KOREAN_RRN",
-            patterns=[south_korean_rrn_pattern],
-            context=["RRN", "korea", "korean", "주민등록"]
-        )
-        custom_recognizers.append(south_korean_rrn_recognizer)
-        
-        # Japanese My Number
-        japanese_my_number_pattern = Pattern(
-            name="japanese_my_number",
-            regex=r'\b\d{12}\b',
-            score=0.8
-        )
-        japanese_my_number_recognizer = PatternRecognizer(
-            supported_entity="JAPANESE_MY_NUMBER",
-            patterns=[japanese_my_number_pattern],
-            context=["My Number", "マイナンバー", "japan"]
-        )
-        custom_recognizers.append(japanese_my_number_recognizer)
-        
-        # Singapore NRIC
-        singapore_nric_pattern = Pattern(
-            name="singapore_nric",
-            regex=r'\b[STG]\d{7}[A-Z]\b',
-            score=0.95
-        )
-        singapore_nric_recognizer = PatternRecognizer(
-            supported_entity="SINGAPORE_NRIC",
-            patterns=[singapore_nric_pattern],
-            context=["NRIC", "singapore", "identity"]
-        )
-        custom_recognizers.append(singapore_nric_recognizer)
-        
-        # UAE Civil Number
-        uae_civil_pattern = Pattern(
-            name="uae_civil",
-            regex=r'\b784[-]?\d{4}[-]?\d{7}[-]?\d{1}\b',
-            score=0.95
-        )
-        uae_civil_recognizer = PatternRecognizer(
-            supported_entity="UAE_CIVIL_NUMBER",
-            patterns=[uae_civil_pattern],
-            context=["Civil", "UAE", "emirates"]
-        )
-        custom_recognizers.append(uae_civil_recognizer)
-        
-        # South African ID
-        sa_id_pattern = Pattern(
-            name="sa_id",
-            regex=r'\b\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9]\d{2}\b',
-            score=0.95
-        )
-        sa_id_recognizer = PatternRecognizer(
-            supported_entity="SOUTH_AFRICAN_ID",
-            patterns=[sa_id_pattern],
-            context=["ID", "south africa", "ZA"]
-        )
-        custom_recognizers.append(sa_id_recognizer)
-        
-        logger.info(f"Created {len(custom_recognizers)} custom recognizers for compliance")
-        
-        
-    except Exception as e:
-        logger.error(f"Error creating custom recognizers: {e}")
-    
-    return custom_recognizers
+    # --- DISABLED: returning empty list to test vanilla Presidio ---
+    logger.info("Custom recognizers DISABLED — using vanilla Presidio only")
+    return []
+
+    # --- Original custom recognizers below (commented out for reference) ---
+    # from presidio_analyzer import PatternRecognizer, Pattern
+    # custom_recognizers = []
+    # ... (all recognizer definitions removed for clarity) ...
 
 def get_protected_ranges(text: str, pseudonym: str) -> List[tuple]:
     """Get text ranges to protect (pseudonym occurrences)."""
@@ -1600,120 +1108,85 @@ async def health():
 @app.post("/anonymize", response_model=AnonymizeResponse)
 async def anonymize(request: AnonymizeRequest):
     """
-    Anonymize text with readable [redacted X] replacements, preserving pseudonym.
+    Anonymize text using standard Presidio pipeline.
     
     Flow:
-    1. ML detection (Presidio AnalyzerEngine + registered PatternRecognizers)
-    2. Supplementary regex detection (currently disabled for tuning)
-    3. Merge ML + regex entities (ML wins on overlap)
-    4. Post-process: fix phone spans, merge adjacent locations
-    5. Apply replacements using get_replacement() with [redacted X] format
+    1. Presidio AnalyzerEngine detects entities (spaCy NER + built-in recognizers)
+    2. Filter out excluded entity types (dates, numbers, etc.) via should_anonymize_entity()
+    3. Presidio AnonymizerEngine replaces entities with <ENTITY_TYPE> tags
     
-    Fail-safe: Falls back to regex-only if ML fails. Never returns original text on error.
+    Pseudonym preservation uses Presidio's allow_list parameter.
+    Fail-safe: Falls back to regex-only if ML fails.
     """
     
     try:
-        ml_entities = []
-        
-        # STEP 1: ML detection
-        if analyzer:
+        if analyzer and anonymizer:
             try:
-                # Get protected ranges for pseudonym
-                protected_ranges = get_protected_ranges(request.text, request.pseudonym)
+                # Build allow_list for pseudonym preservation
+                allow_list = [request.pseudonym] if request.pseudonym else []
                 
-                # Analyze text for PII with confidence threshold
-                # NOTE: Presidio default is 0. We use 0.5 as a balanced global floor.
-                # SpacyRecognizer gives ~0.85 for NER entities, PhoneRecognizer ~0.75
-                # with context. Our registered PatternRecognizers score 0.6-0.75.
-                # Per-type minimums are applied below for extra safety.
+                # STEP 1: Detect entities with Presidio
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.5
+                    score_threshold=0.5,
+                    allow_list=allow_list,
                 )
                 
-                # Per-type minimum score thresholds.
-                # LOCATION/GPE from spaCy NER can produce false positives (common
-                # nouns misidentified as place names). Require higher confidence.
-                # Our CityStateZipRecognizer/StreetAddressRecognizer score 0.7+
-                # so real addresses pass easily.
-                TYPE_MIN_SCORES = {
-                    'LOCATION': 0.6,
-                    'GPE': 0.6,
-                    'LOC': 0.6,
-                }
-                
-                # Filter out entities that overlap pseudonym or are excluded
+                # STEP 2: Filter out excluded entity types (dates, numbers, etc.)
+                filtered_results = []
                 for result in results:
                     entity_text = request.text[result.start:result.end]
                     
-                    # Per-type minimum score check
-                    min_score = TYPE_MIN_SCORES.get(result.entity_type, 0.5)
-                    if result.score < min_score:
-                        logger.debug(f"Skipping low-score entity: {result.entity_type} = '{entity_text}' (score={result.score:.2f} < {min_score})")
-                        continue
-                    
-                    # Check overlap with protected ranges (pseudonym)
-                    overlaps = any(
-                        not (result.end <= start or result.start >= end)
-                        for start, end in protected_ranges
-                    )
-                    
-                    # Check if entity contains pseudonym
-                    if request.pseudonym:
-                        if request.pseudonym.lower() in entity_text.lower():
-                            overlaps = True
-                    
-                    if overlaps:
-                        continue
-                    
-                    # Get context around the entity (50 chars before and after)
+                    # Get context around the entity
                     context_start = max(0, result.start - 50)
                     context_end = min(len(request.text), result.end + 50)
                     context = request.text[context_start:context_end]
                     
-                    # Check if this entity should be anonymized
-                    if not should_anonymize_entity(result.entity_type, entity_text, context):
-                        logger.debug(f"Skipping excluded entity: {result.entity_type} = '{entity_text}'")
-                        continue
-                    
-                    ml_entities.append({
-                        'entity_type': result.entity_type,
-                        'start': result.start,
-                        'end': result.end,
-                        'score': result.score,
-                        'text': entity_text,
-                        'method': 'ml'
+                    if should_anonymize_entity(result.entity_type, entity_text, context):
+                        filtered_results.append(result)
+                        logger.info(f"  KEEP: {result.entity_type} = '{entity_text}' (score={result.score:.2f})")
+                    else:
+                        logger.debug(f"  SKIP: {result.entity_type} = '{entity_text}' (score={result.score:.2f})")
+                
+                logger.info(f"Presidio detected {len(results)} entities, {len(filtered_results)} after filtering")
+                
+                # STEP 3: Anonymize with standard Presidio AnonymizerEngine
+                anonymizer_result = anonymizer.anonymize(
+                    text=request.text,
+                    analyzer_results=filtered_results,
+                )
+                
+                # Build spans list from Presidio's result items
+                anonymized_spans = []
+                for item in anonymizer_result.items:
+                    anonymized_spans.append({
+                        'start': item.start,
+                        'end': item.end,
+                        'entity_type': item.entity_type,
+                        'replacement': item.text,
+                        'operator': item.operator,
                     })
                 
-                logger.info(f"ML detection found {len(ml_entities)} entities (after filtering)")
+                # Reverse to document order (Presidio returns end-to-start)
+                anonymized_spans.reverse()
+                
+                return AnonymizeResponse(
+                    anonymized_text=anonymizer_result.text,
+                    anonymized_spans=anonymized_spans,
+                    pseudonym_preserved=request.pseudonym
+                )
                 
             except Exception as e:
-                logger.error(f"ML detection failed: {e}, will rely on regex only")
-                ml_entities = []
-        else:
-            logger.warning("ML models not available, using regex-only detection")
+                logger.error(f"ML detection/anonymization failed: {e}, falling back to regex")
         
-        # STEP 2: Supplementary regex detection (runs ALWAYS, not just on ML failure)
-        # TODO: Re-enable once regex patterns are tuned (phone parens, state abbrev, ZIP breadth)
-        # regex_entities = supplementary_regex_detection(request.text, request.pseudonym)
-        # if regex_entities:
-        #     logger.info(f"Supplementary regex found {len(regex_entities)} entities")
-        regex_entities = []
-        
-        # STEP 3: Merge (ML takes priority on overlap)
-        all_entities = merge_entities(ml_entities, regex_entities)
-        logger.info(f"Total entities after merge: {len(all_entities)}")
-        
-        # STEP 4: Post-process entities
-        # 4a. Fix phone number spans (include leading parenthesis)
-        all_entities = post_process_phone_spans(all_entities, request.text)
-        # 4b. Merge adjacent location entities into single spans
-        #     Prevents "[redacted location], [redacted location], [redacted location]"
-        all_entities = merge_adjacent_locations(all_entities, request.text)
-        
-        # STEP 5: Apply replacements using get_replacement()
-        anonymized_text, anonymized_spans = apply_replacements(request.text, all_entities)
+        # FALLBACK: regex-only detection + custom apply_replacements
+        logger.warning("Using fallback regex-based detection")
+        fallback_entities = fallback_pii_detection(request.text, request.pseudonym)
+        anonymized_text, anonymized_spans = apply_replacements(
+            request.text,
+            fallback_entities
+        )
         
         return AnonymizeResponse(
             anonymized_text=anonymized_text,
@@ -1722,30 +1195,11 @@ async def anonymize(request: AnonymizeRequest):
         )
         
     except Exception as e:
-        # ULTIMATE FAIL-SAFE: Redact aggressively if everything fails
         logger.critical(f"Complete anonymization failure: {e}")
-        
-        # Try regex-only detection one more time
-        try:
-            fallback_entities = fallback_pii_detection(request.text, request.pseudonym)
-            anonymized_text, anonymized_spans = apply_replacements(
-                request.text,
-                fallback_entities
-            )
-            logger.warning("Emergency fallback successful")
-            
-            return AnonymizeResponse(
-                anonymized_text=anonymized_text,
-                anonymized_spans=anonymized_spans,
-                pseudonym_preserved=request.pseudonym
-            )
-        except Exception as critical_error:
-            # Last resort: return heavily redacted version
-            logger.critical(f"Emergency fallback failed: {critical_error}")
-            raise HTTPException(
-                status_code=500, 
-                detail="Critical anonymization failure. Please contact support. Original text was NOT returned for security."
-            )
+        raise HTTPException(
+            status_code=500, 
+            detail="Critical anonymization failure. Please contact support. Original text was NOT returned for security."
+        )
 
 @app.post("/detect", response_model=DetectResponse)
 async def detect(request: DetectRequest):
