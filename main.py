@@ -545,8 +545,10 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
     
     # Filter 1: Skip very short entities (likely false positives)
-    if len(entity_text_clean) < 3:
-        logger.debug(f"Skipping short entity: '{entity_text_clean}'")
+    # EXCEPTION: LOCATION/GPE/LOC entities can be 2 chars (US state abbreviations: CA, NY, TX)
+    min_length = 2 if entity_upper in ('LOCATION', 'GPE', 'LOC') else 3
+    if len(entity_text_clean) < min_length:
+        logger.debug(f"Skipping short entity: '{entity_text_clean}' (type={entity_upper}, min={min_length})")
         return False
     
     # Filter 2: Skip common words that might be detected as PERSON or ORG
@@ -879,6 +881,69 @@ def create_custom_recognizers():
             context=["school", "college", "university", "institute", "academy"]
         )
         custom_recognizers.append(institution_recognizer)
+        
+        # ========== ADDRESS / LOCATION PATTERN RECOGNIZERS ==========
+        # These run alongside spaCy NER and benefit from Presidio's context
+        # enhancement and overlap resolution. They detect structured address
+        # components that ML NER often misses (ZIP codes, formatted addresses).
+        
+        # City, State ZIP — very specific pattern, high base score
+        # Matches: "Oakland, CA", "New York, NY 10001", "San Francisco, CA 94107-1234"
+        city_state_zip_pattern = Pattern(
+            name="city_state_zip",
+            regex=r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s+\d{5}(?:-\d{4})?)?',
+            score=0.75
+        )
+        city_state_zip_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="CityStateZipRecognizer",
+            patterns=[city_state_zip_pattern],
+            context=["address", "live", "lives", "living", "reside", "resides", "located", "from"]
+        )
+        custom_recognizers.append(city_state_zip_recognizer)
+        
+        # Street Address — matches common US street address formats
+        # Matches: "123 Oak Street", "4500 El Camino Real", "1 Main St"
+        street_address_pattern = Pattern(
+            name="street_address",
+            regex=r'\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|Parkway|Pkwy|Highway|Hwy|Loop)\b',
+            score=0.7
+        )
+        street_address_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="StreetAddressRecognizer",
+            patterns=[street_address_pattern],
+            context=["address", "live", "lives", "living", "reside", "resides", "located", "at"]
+        )
+        custom_recognizers.append(street_address_recognizer)
+        
+        # ZIP Code — weak pattern (any 5 digits), needs context to score well
+        zip_code_pattern = Pattern(
+            name="zip_code",
+            regex=r'\b\d{5}(?:-\d{4})?\b',
+            score=0.1  # Very low base — boosted by context enhancement
+        )
+        zip_code_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="ZipCodeRecognizer",
+            patterns=[zip_code_pattern],
+            context=["zip", "zipcode", "zip code", "postal", "postal code", "address"]
+        )
+        custom_recognizers.append(zip_code_recognizer)
+        
+        # Apartment / Unit — matches "Apt 5B", "Suite 200", "Unit 12A"
+        apt_unit_pattern = Pattern(
+            name="apt_unit",
+            regex=r'\b(?:Apt|Apartment|Unit|Suite|Ste|#)\s*[A-Za-z0-9]+\b',
+            score=0.6
+        )
+        apt_unit_recognizer = PatternRecognizer(
+            supported_entity="LOCATION",
+            name="AptUnitRecognizer",
+            patterns=[apt_unit_pattern],
+            context=["address", "apartment", "suite", "unit", "floor"]
+        )
+        custom_recognizers.append(apt_unit_recognizer)
         
         # ========== INTERNATIONAL IDENTITY CARD RECOGNIZERS ==========
         
@@ -1283,6 +1348,106 @@ def merge_entities(ml_entities: List[Dict], regex_entities: List[Dict]) -> List[
     return merged
 
 
+def merge_adjacent_locations(entities: List[Dict], text: str) -> List[Dict]:
+    """
+    Merge adjacent LOCATION-type entities into a single entity.
+    
+    Prevents output like "[redacted location], [redacted location], [redacted location]"
+    by collapsing nearby location entities (including the gap text between them)
+    into one span that gets a single "[redacted location]" replacement.
+    
+    Two location entities merge when:
+    - The gap between them is ≤ 20 characters
+    - The gap text contains only whitespace, commas, periods, hyphens, and digits
+      (typical address separators like ", " and trailing ZIP codes like " 94611")
+    """
+    LOCATION_TYPES = {
+        'LOCATION', 'GPE', 'LOC', 'STREET_ADDRESS', 'CITY_STATE',
+        'STATE_ABBREVIATION', 'APT_UNIT', 'ZIP_CODE', 'ADDRESS',
+    }
+    
+    if not entities:
+        return entities
+    
+    # Separate location and non-location entities
+    locations = [e for e in entities if e.get('entity_type', '').upper() in LOCATION_TYPES]
+    non_locations = [e for e in entities if e.get('entity_type', '').upper() not in LOCATION_TYPES]
+    
+    if len(locations) <= 1:
+        return entities
+    
+    # Sort locations by start position
+    locations.sort(key=lambda x: x['start'])
+    
+    # Merge adjacent locations
+    merged_locations = [locations[0].copy()]
+    
+    for loc in locations[1:]:
+        prev = merged_locations[-1]
+        gap_start = prev['end']
+        gap_end = loc['start']
+        gap_text = text[gap_start:gap_end]
+        
+        # Merge if gap is small and contains only address separators
+        # (whitespace, commas, periods, hyphens, digits — e.g. ", " or " 94611 ")
+        if (gap_end - gap_start) <= 20 and re.match(r'^[\s,.\-\d]*$', gap_text):
+            # Extend the previous merged entity to cover this one too
+            prev['end'] = loc['end']
+            prev['text'] = text[prev['start']:prev['end']]
+            prev['entity_type'] = 'LOCATION'  # Normalize to LOCATION
+            prev['score'] = max(prev.get('score', 0), loc.get('score', 0))
+            logger.debug(f"Merged adjacent locations: '{prev['text']}'")
+        else:
+            merged_locations.append(loc.copy())
+    
+    # After merging, extend each merged location to absorb trailing ZIP-like
+    # sequences that weren't independently detected (e.g. "94611" after "CA")
+    for loc in merged_locations:
+        remaining = text[loc['end']:]
+        zip_match = re.match(r'^[\s,]*(\d{5}(?:-\d{4})?)\b', remaining)
+        if zip_match:
+            new_end = loc['end'] + zip_match.end()
+            # Guard: don't extend into another entity's span
+            overlaps_other = any(
+                not (new_end <= e['start'] or loc['end'] >= e['end'])
+                for e in non_locations
+            )
+            if not overlaps_other:
+                loc['end'] = new_end
+                loc['text'] = text[loc['start']:loc['end']]
+                logger.debug(f"Extended location to absorb trailing ZIP: '{loc['text']}'")
+            else:
+                logger.debug(f"Skipped ZIP absorption — would overlap with non-location entity")
+    
+    result = non_locations + merged_locations
+    result.sort(key=lambda x: x['start'])
+    
+    logger.info(
+        f"Location merge: {len(locations)} location entities → {len(merged_locations)} "
+        f"(total entities: {len(result)})"
+    )
+    return result
+
+
+def post_process_phone_spans(entities: List[Dict], text: str) -> List[Dict]:
+    """
+    Fix phone number span boundaries.
+    
+    Presidio's PhoneRecognizer (using python-phonenumbers) sometimes starts
+    the detected span AFTER a leading '(', producing orphaned parentheses
+    like "([redacted phone]". This function extends the span to include it.
+    """
+    for entity in entities:
+        if entity.get('entity_type', '').upper() == 'PHONE_NUMBER':
+            start = entity['start']
+            # Check if the character immediately before the span is '('
+            if start > 0 and text[start - 1] == '(':
+                entity['start'] = start - 1
+                entity['text'] = text[entity['start']:entity['end']]
+                logger.debug(f"Extended phone span to include leading '(': '{entity['text']}'")
+    return entities
+
+
 def apply_replacements(text: str, entities: List[Dict]) -> Tuple[str, List[Dict]]:
     """
     Apply readable replacements to text based on detected entities.
@@ -1422,10 +1587,11 @@ async def anonymize(request: AnonymizeRequest):
     Anonymize text with readable [redacted X] replacements, preserving pseudonym.
     
     Flow:
-    1. ML detection (Presidio AnalyzerEngine) for all entity types
-    2. Supplementary regex detection (always runs alongside ML)
-    3. Merge entities (ML wins on overlap)
-    4. Apply replacements using get_replacement() with [redacted X] format
+    1. ML detection (Presidio AnalyzerEngine + registered PatternRecognizers)
+    2. Supplementary regex detection (currently disabled for tuning)
+    3. Merge ML + regex entities (ML wins on overlap)
+    4. Post-process: fix phone spans, merge adjacent locations
+    5. Apply replacements using get_replacement() with [redacted X] format
     
     Fail-safe: Falls back to regex-only if ML fails. Never returns original text on error.
     """
@@ -1440,10 +1606,13 @@ async def anonymize(request: AnonymizeRequest):
                 protected_ranges = get_protected_ranges(request.text, request.pseudonym)
                 
                 # Analyze text for PII with confidence threshold
+                # NOTE: Presidio default is 0. We use 0.35 to catch most PII while
+                # filtering noise. PhoneRecognizer base=0.4, SpacyRecognizer base=0.85,
+                # pattern recognizers base varies. Context enhancement adds ~0.35.
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.7
+                    score_threshold=0.35
                 )
                 
                 # Filter out entities that overlap pseudonym or are excluded
@@ -1500,9 +1669,16 @@ async def anonymize(request: AnonymizeRequest):
         
         # STEP 3: Merge (ML takes priority on overlap)
         all_entities = merge_entities(ml_entities, regex_entities)
-        logger.info(f"Total entities after merge: {len(all_entities)} (supplementary regex disabled for tuning)")
+        logger.info(f"Total entities after merge: {len(all_entities)}")
         
-        # STEP 4: Apply replacements using get_replacement()
+        # STEP 4: Post-process entities
+        # 4a. Fix phone number spans (include leading parenthesis)
+        all_entities = post_process_phone_spans(all_entities, request.text)
+        # 4b. Merge adjacent location entities into single spans
+        #     Prevents "[redacted location], [redacted location], [redacted location]"
+        all_entities = merge_adjacent_locations(all_entities, request.text)
+        
+        # STEP 5: Apply replacements using get_replacement()
         anonymized_text, anonymized_spans = apply_replacements(request.text, all_entities)
         
         return AnonymizeResponse(
@@ -1554,7 +1730,7 @@ async def detect(request: DetectRequest):
                 results = analyzer.analyze(
                     text=request.text,
                     language=request.language,
-                    score_threshold=0.7
+                    score_threshold=0.35
                 )
                 
                 # Filter and format results
