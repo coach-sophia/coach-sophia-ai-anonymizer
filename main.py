@@ -485,9 +485,16 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
     if entity_upper in EXCLUDED_ENTITY_TYPES:
         return False
     
-    # HIPAA Safe Harbor: preserve ages under 89 (only 89+ must be anonymized)
-    # spaCy detects "38-year-old" as DATE_TIME, so we catch age patterns here.
+    # HIPAA Safe Harbor §164.514(b)(2)(i)(C):
+    # "All elements of dates (except year) directly related to an individual,
+    #  including birth date, admission date, discharge date, date of death;
+    #  and all ages over 89."
+    #
+    # Strategy: instead of redacting ALL DATE_TIME and carving out exceptions,
+    # only redact entities that contain an actual specific date. Everything else
+    # (durations, times of day, relative references) passes through.
     if entity_upper in ('DATE_TIME', 'DATE'):
+        # Ages under 89: preserve. Ages 89+: anonymize.
         age_match = re.match(r'^(\d+)[-\s]*year', entity_text_clean, re.IGNORECASE)
         if age_match:
             age = int(age_match.group(1))
@@ -498,25 +505,29 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
                 logger.info(f"Anonymizing age 89+: '{entity_text_clean}'")
                 return True
         
-        # Preserve durations/time periods — these are NOT dates directly related
-        # to an individual. e.g., "over six years", "three months", "a few days".
-        duration_match = re.match(
-            r'^(?:over|about|approximately|nearly|almost|around|'
-            r'more\s+than|less\s+than|at\s+least|under|'
-            r'the\s+(?:last|past|next|first|previous)\s+)?\s*'
-            r'(?:a\s+few|a\s+couple\s+(?:of\s+)?|several|many|some|'
-            r'one|two|three|four|five|six|seven|eight|nine|ten|'
-            r'eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|'
-            r'eighteen|nineteen|twenty|thirty|forty|fifty|sixty|'
-            r'seventy|eighty|ninety|hundred|'
-            r'\d+)\s+'
-            r'(?:year|month|week|day|hour|minute|second|decade|centur)'
-            r'(?:ies|y|s)?\b',
+        # Only redact if the entity contains a SPECIFIC date indicator:
+        # 1. A month name (full or standard abbreviation)
+        has_month = bool(re.search(
+            r'\b(?:January|February|March|April|May|June|July|August|'
+            r'September|October|November|December|'
+            r'Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\b',
             entity_text_clean, re.IGNORECASE
-        )
-        if duration_match:
-            logger.debug(f"Preserving duration: '{entity_text_clean}'")
-            return False
+        ))
+        # 2. A 4-digit year (1900-2099)
+        has_year = bool(re.search(r'\b(?:19|20)\d{2}\b', entity_text_clean))
+        # 3. A numeric date format (e.g., 01/15/2024, 2024-01-15)
+        has_numeric_date = bool(re.search(
+            r'\b\d{1,4}[/-]\d{1,2}[/-]\d{1,4}\b', entity_text_clean
+        ))
+        
+        if has_month or has_year or has_numeric_date:
+            return True  # Specific date → redact (year preserved by operator)
+        
+        # Not a specific date — preserve it.
+        # Covers: "in the afternoon", "over six years", "last week",
+        # "recently", "the morning", "on Mondays", etc.
+        logger.debug(f"Preserving non-specific date/time: '{entity_text_clean}'")
+        return False
     
     # ===== ADDITIONAL FILTERING TO PREVENT FALSE POSITIVES =====
     
