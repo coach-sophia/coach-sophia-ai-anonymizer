@@ -566,18 +566,32 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
         've', 'ive', "i've", 'have', 'has', 'had', 'been', 'being', 'be',
         # Coaching/therapy domain terms
         'coaching', 'therapy', 'session', 'practice', 'clinic',
-        'mindfulness', 'wellness', 'resilience', 'burnout',
+        'mindfulness', 'wellness', 'wellbeing', 'resilience', 'burnout',
+        'health', 'mental', 'emotional', 'psychological', 'behavioral',
+        'self', 'care', 'growth', 'development', 'leadership',
+        # Common platforms/tools (not PII — these are tool references, not employer names)
+        'slack', 'zoom', 'teams', 'skype', 'whatsapp', 'signal', 'telegram',
+        'gmail', 'outlook', 'notion', 'asana', 'trello', 'jira', 'confluence',
+        'dropbox', 'drive', 'docs', 'sheets', 'calendar', 'meet',
+        'facetime', 'discord', 'linkedin', 'twitter', 'facebook', 'instagram',
     }
     
     # Check for common words - applies to PERSON and ORG entities
     if entity_upper in ['PERSON', 'ORG', 'ORGANIZATION', 'COMPANY_NAME']:
+        # Skip ORG entities that look like email addresses (spaCy misclassification).
+        # The EmailRecognizer should handle these instead.
+        if entity_upper in ('ORG', 'ORGANIZATION') and '@' in entity_text_clean:
+            logger.debug(f"Skipping email-like ORG: '{entity_text_clean}'")
+            return False
+        
         # Split entity text into words and check each
-        entity_words = entity_text_clean.lower().split()
-        if all(word in COMMON_WORDS_NOT_PII for word in entity_words):
+        # Strip punctuation like "&" for the word check
+        entity_words = re.findall(r'[a-zA-Z]+', entity_text_clean.lower())
+        if entity_words and all(word in COMMON_WORDS_NOT_PII for word in entity_words):
             logger.debug(f"Skipping common words detected as {entity_upper}: '{entity_text_clean}'")
             return False
         
-        # Also check if the entire text is a common phrase
+        # Also check if the entire text (lowered) is a common phrase
         if entity_text_clean.lower() in COMMON_WORDS_NOT_PII:
             logger.debug(f"Skipping common word detected as {entity_upper}: '{entity_text_clean}'")
             return False
@@ -867,13 +881,26 @@ def create_custom_recognizers():
             regex=r'\b\d{5}(?:-\d{4})?\b',
             score=0.01,  # Very low — needs context enhancement to pass threshold
         )
+        # ZIP in parentheses — e.g., "(94123)" — very likely a ZIP code, higher score
+        zip_parens_pattern = Pattern(
+            name="zip_parens",
+            regex=r'\(\d{5}(?:-\d{4})?\)',
+            score=0.75,
+        )
         zip_recognizer = PatternRecognizer(
             supported_entity="ZIP_CODE",
             name="ZipCodeRecognizer",
-            patterns=[zip_state_name_pattern, zip_bare_pattern],
+            patterns=[zip_state_name_pattern, zip_parens_pattern, zip_bare_pattern],
             global_regex_flags=CASE_SENSITIVE_FLAGS,  # State names are capitalized
-            context=["zip", "postal", "address", "county", "state",
-                     "california", "oakland", "resides", "residing"],
+            context=["zip", "postal", "address", "county", "state", "area",
+                     "neighborhood", "district", "region", "located", "based",
+                     "california", "oakland", "resides", "residing",
+                     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL",
+                     "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA",
+                     "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE",
+                     "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+                     "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT",
+                     "VA", "WA", "WV", "WI", "WY", "DC"],
         )
         custom_recognizers.append(zip_recognizer)
         
