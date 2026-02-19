@@ -569,6 +569,11 @@ def should_anonymize_entity(entity_type: str, entity_text: str = "", context: st
         'mindfulness', 'wellness', 'wellbeing', 'resilience', 'burnout',
         'health', 'mental', 'emotional', 'psychological', 'behavioral',
         'self', 'care', 'growth', 'development', 'leadership',
+        # Medical/clinical abbreviations often misdetected as ORG
+        'dob', 'phi', 'pii', 'hipaa', 'ehr', 'emr', 'icd', 'cpt',
+        'dx', 'rx', 'tx', 'hx', 'sx', 'bmi', 'bp', 'hr',
+        # Government program / ID labels (the label is not PII, the number is)
+        'ssn', 'social', 'security', 'medicare', 'medicaid', 'irs',
         # Common platforms/tools (not PII — these are tool references, not employer names)
         'slack', 'zoom', 'teams', 'skype', 'whatsapp', 'signal', 'telegram',
         'gmail', 'outlook', 'notion', 'asana', 'trello', 'jira', 'confluence',
@@ -680,11 +685,10 @@ def post_process_anonymized_text(text: str) -> str:
     """
     Clean up anonymized text artifacts.
     
-    1. Merge adjacent <ORGANIZATION> <PERSON> into <PERSON> — spaCy sometimes
-       splits a full name like "Franklin Michael Alvarez" into ORG + PERSON.
-       Both are redacted, but the label is misleading.
-    2. Clean up markdown link artifacts where URLs inside [text](url) markup
+    1. Clean up markdown link artifacts where URLs inside [text](url) markup
        both get replaced with <URL>, producing fragments like [<URL>(<URL>).
+    2. Remove trailing lines that are just standalone entity tags (artifacts
+       from markdown link cleanup or duplicate URL detection).
     """
     # Clean up markdown link artifacts: [<TAG>](<TAG>) or [<TAG>(<TAG>) → <TAG>
     text = re.sub(r'\[(<[A-Z_]+>)\]?\(\1\)', r'\1', text)
@@ -720,9 +724,18 @@ def create_custom_recognizers():
     try:
         # City, State ZIP — e.g. "Oakland, CA", "New York, NY 10001"
         # Requires capitalized city name + uppercase 2-letter state abbreviation
+        # City word: "Oakland", "Winston-Salem", "O'Fallon"
+        # Single capital allowed only before hyphen/apostrophe (prevents "I, CA")
+        city_word = r"(?:[A-Z][a-z]+|[A-Z](?=[-']))(?:[-'][A-Z]?[a-z]+)*"
         city_state_zip_pattern = Pattern(
             name="city_state_zip",
-            regex=r'(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)(?:\s+\d{5}(?:-\d{4})?)?',
+            regex=(
+                r"(?:" + city_word + r"(?:\s+" + city_word + r")*)"
+                r",\s*(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|"
+                r"ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|"
+                r"RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)"
+                r"(?:\s+\d{5}(?:-\d{4})?)?"
+            ),
             score=0.75,
         )
         city_state_zip_recognizer = PatternRecognizer(
@@ -734,18 +747,53 @@ def create_custom_recognizers():
         )
         custom_recognizers.append(city_state_zip_recognizer)
         
-        # Street Address — e.g. "4217 Piedmont Avenue", "123 Oak St"
+        # Street Address — e.g. "4217 Piedmont Avenue", "123 Oak St", "815 3rd Ave",
+        # "789 E Main St", "100 N Broadway"
+        # Handles: ordinal street names (1st, 2nd, 3rd, 42nd), directional prefixes
+        # (N/S/E/W/NE/NW/SE/SW/North/South/East/West), and standard capitalized names.
+        street_suffixes = (
+            r'(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Road|Rd|'
+            r'Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|'
+            r'Parkway|Pkwy|Highway|Hwy|Loop|Alley|Aly)'
+        )
         street_address_pattern = Pattern(
             name="street_address",
-            regex=r'\b\d{1,5}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Avenue|Ave|Boulevard|Blvd|Drive|Dr|Lane|Ln|Road|Rd|Court|Ct|Place|Pl|Way|Circle|Cir|Terrace|Ter|Trail|Trl|Parkway|Pkwy|Highway|Hwy|Loop)\b',
+            regex=(
+                r'\b\d{1,5}\s+'
+                r'(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\.?\s+)?'
+                r'(?:'
+                    r'\d{1,3}(?:st|nd|rd|th)'       # ordinal: "3rd", "42nd"
+                    r'|'
+                    r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*'  # capitalized: "Piedmont", "Martin Luther King"
+                r')\s+'
+                + street_suffixes
+                + r'\.?\b'
+            ),
             score=0.7,
+        )
+        # Also match "Broadway" / other suffix-less street names (common exceptions)
+        street_no_suffix_pattern = Pattern(
+            name="street_no_suffix",
+            regex=(
+                r'\b\d{1,5}\s+'
+                r'(?:(?:N|S|E|W|NE|NW|SE|SW|North|South|East|West)\.?\s+)?'
+                r'(?:Broadway|Main|Park|Market|Broad|High|Wall|Canal|Spring)\b'
+            ),
+            score=0.65,
+        )
+        # PO Box — e.g. "P.O. Box 1234", "PO Box 456", "P.O. Box 789"
+        # HIPAA #2: geographic subdivision smaller than state
+        po_box_pattern = Pattern(
+            name="po_box",
+            regex=r'\bP\.?O\.?\s*Box\s+\d+\b',
+            score=0.85,
         )
         street_address_recognizer = PatternRecognizer(
             supported_entity="STREET",
             name="StreetAddressRecognizer",
-            patterns=[street_address_pattern],
+            patterns=[street_address_pattern, street_no_suffix_pattern, po_box_pattern],
             global_regex_flags=CASE_SENSITIVE_FLAGS,
-            context=["address", "live", "lives", "living", "reside", "resides", "located", "at"],
+            context=["address", "live", "lives", "living", "reside", "resides", "located", "at", "mail", "send"],
         )
         custom_recognizers.append(street_address_recognizer)
         
@@ -1457,7 +1505,7 @@ async def anonymize(request: AnonymizeRequest):
                     operators=operators,
                 )
                 
-                # STEP 4: Post-process to clean up artifacts
+                # STEP 5: Post-process to clean up artifacts
                 anonymized_text = post_process_anonymized_text(anonymizer_result.text)
                 
                 # Build spans list from Presidio's result items
