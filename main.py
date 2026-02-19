@@ -662,7 +662,7 @@ def hipaa_date_operator(entity_text: str) -> str:
     # Extract year from date (19xx or 20xx)
     year_match = re.search(r'\b((?:19|20)\d{2})\b', entity_text)
     if year_match:
-        return year_match.group(1)
+        return f'<DATE> {year_match.group(1)}'
     
     # No year found (e.g., "March 14th", "last Tuesday") → full redaction
     return '<DATE_TIME>'
