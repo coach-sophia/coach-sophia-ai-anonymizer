@@ -964,6 +964,27 @@ def create_custom_recognizers():
         )
         custom_recognizers.append(unique_id_recognizer)
         
+        # --- HIPAA #14: URLs ---
+        # Presidio's built-in UrlRecognizer may not fire reliably in all
+        # versions. This custom recognizer ensures URLs are always caught.
+        url_recognizer = PatternRecognizer(
+            supported_entity="URL",
+            name="CustomUrlRecognizer",
+            patterns=[
+                Pattern(
+                    name="url_full",
+                    regex=r'https?://[^\s)<>\"\']+',
+                    score=0.6,
+                ),
+                Pattern(
+                    name="url_www",
+                    regex=r'\bwww\.[a-zA-Z0-9][a-zA-Z0-9._/\-~:?#@!$&*()+,;=%]+',
+                    score=0.6,
+                ),
+            ],
+        )
+        custom_recognizers.append(url_recognizer)
+        
         logger.info(f"Total custom recognizers: {len(custom_recognizers)} (address + HIPAA identifiers)")
         
     except Exception as e:
